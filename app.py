@@ -227,6 +227,9 @@ if "tasks" not in st.session_state:
 if "tasks_reference_date" not in st.session_state:
     st.session_state.tasks_reference_date = None
 
+# 화면에 보여줄 최근 대화 기록
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
 
 # ==================================================
 # 6. 사이드바
@@ -610,6 +613,32 @@ if submit:
         "content": answer
     })
 
+    # 이메일 처리 결과 확인
+    email_status = None
+
+    if tool_calls:
+        for output in tool_outputs:
+            result_data = json.loads(output["output"])
+
+            if result_data.get("status") == "success":
+                email_status = "✉️ 발송 요청 완료"
+            else:
+                email_status = "⚠️ 발송 실패 또는 완료 확인 불가"
+
+    # 질문 + 최종 답변을 한 쌍으로 저장
+    st.session_state.chat_history.append({
+        "time": datetime.now(
+            ZoneInfo("Asia/Seoul")
+        ).strftime("%Y-%m-%d %H:%M"),
+        "question": user_text,
+        "answer": answer,
+        "email_status": email_status
+    })
+
+    # 최근 10쌍만 유지
+    st.session_state.chat_history = (
+        st.session_state.chat_history[-10:]
+    )
     with st.chat_message("assistant"):
         st.markdown(answer)
 
