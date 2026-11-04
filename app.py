@@ -22,65 +22,44 @@ st.set_page_config(
     layout="wide"
 )
 
-# 화면 스타일
+# 화면 스타일: 밝은 배경과 보라색 포인트
 st.markdown(
     """
     <style>
-    /* 전체 배경 */
-    .stApp {
-        background-color: #F7F6FC;
-    }
-
-    /* 본문 여백 */
-    .block-container {
-        padding-top: 2rem;
-        padding-bottom: 3rem;
-    }
-
-    /* 제목 */
-    h1, h2, h3 {
-        color: #242038;
-    }
-
-    /* 버튼 모서리 */
-    .stButton > button,
-    .stFormSubmitButton > button {
+    .stApp { background-color: #F7F6FC; }
+    .block-container { padding-top: 2rem; padding-bottom: 3rem; }
+    h1, h2, h3 { color: #242038; }
+    .stButton > button, .stFormSubmitButton > button {
         border-radius: 12px;
     }
-
-    /* 주요 버튼 */
-    button[kind="primary"],
-    button[kind="primaryFormSubmit"] {
+    button[kind="primary"], button[kind="primaryFormSubmit"] {
         background-color: #6D3CE8;
         border-color: #6D3CE8;
         color: white;
     }
-
-    /* 입력 폼 */
+    button[kind="primary"]:hover, button[kind="primaryFormSubmit"]:hover {
+        background-color: #5930C5;
+        border-color: #5930C5;
+        color: white;
+    }
     [data-testid="stForm"] {
         background-color: white;
         border: 1px solid #E5DFF3;
         border-radius: 18px;
         padding: 24px;
     }
-
-    /* 업무 현황 카드 */
     [data-testid="stMetric"] {
         background-color: white;
         border: 1px solid #E5DFF3;
         border-radius: 16px;
         padding: 18px;
     }
-
-    [data-testid="stMetricValue"] {
-        color: #6D3CE8;
-    }
+    [data-testid="stMetricValue"] { color: #6D3CE8; }
     </style>
     """,
     unsafe_allow_html=True
 )
 
-# 상단 제목
 st.title("🎙️ 에이블")
 st.caption("AI 개인비서 · 회의부터 업무와 일정까지")
 
@@ -451,10 +430,10 @@ with st.form("task_form"):
 
     audio_value = st.audio_input("무엇을 도와드릴까요?")
     submit = st.form_submit_button(
-    "에이블에게 요청하기",
-    type="primary",
-    use_container_width=True
-)
+        "에이블에게 요청하기",
+        type="primary",
+        use_container_width=True
+    )
 
 
 # 새 회의록은 이전 대화를 표시하기 전에 반영
