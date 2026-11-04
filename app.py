@@ -81,3 +81,24 @@ if submit:
         # 응답 출력
         st.subheader("AI 답변")
         st.write(answer)
+
+    # TTS: 최종 답변 → 음성
+    with st.spinner("음성 답변을 준비하고 있습니다..."):
+        try:
+            speech = client.audio.speech.create(
+                model="tts-1",
+                voice="nova",
+                input=answer,
+                response_format="mp3"
+            )
+
+            # 생성된 음성을 자동 재생
+            st.caption("AI가 생성한 음성입니다.")
+            st.audio(
+                speech.content,
+                format="audio/mpeg",
+                autoplay=True
+            )
+
+        except Exception as e:
+            st.error(f"음성 생성 중 오류가 발생했습니다: {e}")
