@@ -7,6 +7,7 @@ from email.mime.text import MIMEText
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 import uuid
+import calendar
 
 import streamlit as st
 from openai import OpenAI
@@ -803,3 +804,268 @@ else:
         "회의록을 업로드하고 실행한 뒤 "
         "'회의록에서 체크리스트 만들기'를 눌러 주세요."
     )
+
+    # ==================================================
+# 11. 업무 캘린더
+# ==================================================
+st.divider()
+st.subheader("📅 업무 캘린더")
+st.caption("날짜를 누르면 해당 날짜에 마감하는 업무를 확인할 수 있습니다.")
+
+calendar_today = datetime.now(ZoneInfo("Asia/Seoul")).date()
+
+# 캘린더 화면 상태
+if "calendar_month" not in st.session_state:
+    st.session_state.calendar_month = calendar_today.replace(day=1)
+
+if "calendar_selected_date" not in st.session_state:
+    st.session_state.calendar_selected_date = calendar_today
+
+
+# --------------------------------------------------
+# 캘린더 조작 함수
+# --------------------------------------------------
+def move_calendar_month(offset):
+    current = st.session_state.calendar_month
+
+    # 연도가 바뀌는 경우도 처리
+    month_index = current.year * 12 + current.month - 1 + offset
+    year, month_zero = divmod(month_index, 12)
+
+    target = date(year, month_zero + 1, 1)
+
+    st.session_state.calendar_month = target
+    st.session_state.calendar_selected_date = target
+
+
+def select_calendar_date(selected_date):
+    st.session_state.calendar_selected_date = selected_date
+
+
+def go_to_calendar_today():
+    current_today = datetime.now(ZoneInfo("Asia/Seoul")).date()
+    st.session_state.calendar_month = current_today.replace(day=1)
+    st.session_state.calendar_selected_date = current_today
+
+
+def calendar_task_label(task):
+    if task.get("done", False):
+        return "✅ 완료"
+
+    _, urgency, _ = get_task_priority(task, calendar_today)
+
+    return {
+        "기한 경과": "🔴 기한 경과",
+        "긴급": "🟠 마감 임박",
+        "일반": "🔵 예정",
+        "기한 확인 필요": "⚪ 기한 미정"
+    }[urgency]
+
+
+# --------------------------------------------------
+# 기존 업무를 날짜별로 분류
+# 별도의 AI 호출 없이 체크리스트 데이터를 사용
+# --------------------------------------------------
+tasks_by_date = {}
+undated_tasks = []
+
+for task in st.session_state.tasks:
+    try:
+        due = (
+            date.fromisoformat(task["due_date"])
+            if task.get("due_date")
+            else None
+        )
+    except (ValueError, TypeError):
+        due = None
+
+    if due is None:
+        undated_tasks.append(task)
+    else:
+        tasks_by_date.setdefault(due, []).append(task)
+
+
+# --------------------------------------------------
+# 월 이동 버튼
+# --------------------------------------------------
+prev_col, title_col, next_col, today_col = st.columns([1, 3, 1, 1])
+
+with prev_col:
+    st.button(
+        "◀ 이전 달",
+        key="calendar_prev",
+        on_click=move_calendar_month,
+        args=(-1,),
+        use_container_width=True
+    )
+
+with next_col:
+    st.button(
+        "다음 달 ▶",
+        key="calendar_next",
+        on_click=move_calendar_month,
+        args=(1,),
+        use_container_width=True
+    )
+
+with today_col:
+    st.button(
+        "오늘",
+        key="calendar_today_button",
+        on_click=go_to_calendar_today,
+        use_container_width=True
+    )
+
+view_month = st.session_state.calendar_month
+selected_date = st.session_state.calendar_selected_date
+
+with title_col:
+    st.markdown(f"### {view_month.year}년 {view_month.month}월")
+
+st.caption("🔴 기한 경과 · 🟠 마감 임박 · 🔵 예정 · ✅ 완료")
+
+
+# --------------------------------------------------
+# 요일 표시
+# --------------------------------------------------
+weekday_columns = st.columns(7)
+
+for column, weekday in zip(
+    weekday_columns,
+    ["월", "화", "수", "목", "금", "토", "일"]
+):
+    column.markdown(f"**{weekday}**")
+
+
+# --------------------------------------------------
+# 월간 달력 표시
+# --------------------------------------------------
+month_calendar = calendar.Calendar(firstweekday=0)
+weeks = month_calendar.monthdayscalendar(
+    view_month.year,
+    view_month.month
+)
+
+for week_index, week in enumerate(weeks):
+    day_columns = st.columns(7)
+
+    for weekday_index, day_number in enumerate(week):
+        with day_columns[weekday_index]:
+            # 이번 달에 포함되지 않는 빈칸
+            if day_number == 0:
+                st.write("")
+                continue
+
+            current_date = date(
+                view_month.year,
+                view_month.month,
+                day_number
+            )
+
+            day_tasks = tasks_by_date.get(current_date, [])
+
+            # 미완료 업무를 먼저 표시
+            day_tasks = sorted(
+                day_tasks,
+                key=lambda task: (
+                    task.get("done", False),
+                    *get_task_priority(task, calendar_today)[0]
+                )
+            )
+
+            with st.container(border=True):
+                date_label = f"{day_number}일"
+
+                if current_date == calendar_today:
+                    date_label += " · 오늘"
+
+                st.button(
+                    date_label,
+                    key=f"calendar_day_{current_date.isoformat()}",
+                    type=(
+                        "primary"
+                        if current_date == selected_date
+                        else "secondary"
+                    ),
+                    on_click=select_calendar_date,
+                    args=(current_date,),
+                    use_container_width=True
+                )
+
+                if day_tasks:
+                    st.caption(f"마감 업무 {len(day_tasks)}건")
+
+                    # 칸이 너무 길어지지 않도록 2건까지만 미리 보기
+                    for task in day_tasks[:2]:
+                        status = calendar_task_label(task)
+                        icon = status.split()[0]
+
+                        title = task["title"]
+                        short_title = (
+                            title[:16] + "…"
+                            if len(title) > 16
+                            else title
+                        )
+
+                        st.caption(f"{icon} {short_title}")
+
+                    if len(day_tasks) > 2:
+                        st.caption(f"외 {len(day_tasks) - 2}건")
+
+
+# --------------------------------------------------
+# 선택한 날짜의 업무 상세
+# --------------------------------------------------
+st.markdown(
+    f"#### 📌 {selected_date.month}월 {selected_date.day}일 마감 업무"
+)
+
+selected_tasks = sorted(
+    tasks_by_date.get(selected_date, []),
+    key=lambda task: (
+        task.get("done", False),
+        *get_task_priority(task, calendar_today)[0]
+    )
+)
+
+if not selected_tasks:
+    st.info("선택한 날짜에 마감하는 업무가 없습니다.")
+
+else:
+    for task in selected_tasks:
+        with st.container(border=True):
+            st.markdown(f"**{task['title']}**")
+
+            _, _, deadline_label = get_task_priority(
+                task,
+                calendar_today
+            )
+
+            st.caption(
+                f"{calendar_task_label(task)}"
+                f" · 중요도: {task['importance']}"
+                f" · {deadline_label}"
+            )
+
+            st.write(task["detail"])
+
+            with st.expander("마감일과 중요도 근거"):
+                st.write("마감일 근거:", task["due_evidence"])
+                st.write("중요도 근거:", task["importance_evidence"])
+
+    st.caption("완료 여부는 위의 업무 체크리스트에서 변경해 주세요.")
+
+
+# --------------------------------------------------
+# 기한이 없는 업무
+# --------------------------------------------------
+with st.expander(f"⚪ 기한 미정 업무 {len(undated_tasks)}건"):
+    if not undated_tasks:
+        st.write("기한 미정 업무가 없습니다.")
+
+    for task in undated_tasks:
+        status = "✅ 완료" if task.get("done", False) else "⬜ 미완료"
+
+        st.markdown(f"**{status} · {task['title']}**")
+        st.write(task["detail"])
+        st.caption(f"기한 근거: {task['due_evidence']}")
