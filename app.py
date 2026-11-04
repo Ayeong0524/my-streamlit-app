@@ -73,7 +73,7 @@ if submit:
         # LLM 호출
         response = client.responses.create(
             model="gpt-4o-mini",
-            input=input_messages
+            input=input_messages,
             temperature=0
         )
         answer = response.output_text
