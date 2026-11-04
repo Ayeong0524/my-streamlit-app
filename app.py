@@ -505,9 +505,34 @@ def c3_resolve_deadline(value, base):
     return None
 
 
-def c3_due(expr, base):
+def c3_deadline_info(expr, base):
+    """(날짜, 임시 여부, 적용 규칙). 기준일은 추출 시 고정합니다."""
+    compact = re.sub(r"\s+", "", expr or "")
+    compact = re.sub(r"(?:까지|마감)$", "", compact)
+    week = re.fullmatch(r"(이번주|다음주|다다음주)(초|중|말)?", compact)
+    if week:
+        offset = {"이번주": 0, "다음주": 7, "다다음주": 14}[week[1]]
+        weekday = {None: 4, "초": 0, "중": 2, "말": 6}[week[2]]
+        due = base - timedelta(days=base.weekday()) + timedelta(days=offset + weekday)
+        return due, True, f"{week[1]} {'월화수목금토일'[weekday]}요일을 임시 마감일로 설정"
+    month = re.fullmatch(r"(이번달|이달|다음달|다다음달)(초|초순|중|중순|말|말일|하순)?", compact)
+    if month:
+        shift = {"이번달": 0, "이달": 0, "다음달": 1, "다다음달": 2}[month[1]]
+        year, zero = divmod(base.year * 12 + base.month - 1 + shift, 12)
+        part = month[2]
+        day = 15 if part in ("중", "중순") else 21 if part == "하순" else calendar.monthrange(year, zero+1)[1] if part in ("말", "말일") else 1
+        estimated = part not in ("말", "말일")
+        return date(year, zero+1, day), estimated, f"{month[1]} {day}일" + ("을 임시 마감일로 설정" if estimated else " (말일)")
+    relative = re.fullmatch(r"(\d+)(일|주)(안에|이내|후|뒤)", compact)
+    if relative:
+        days = int(relative[1]) * (7 if relative[2] == "주" else 1)
+        return base + timedelta(days=days), False, f"기준일로부터 {days}일 뒤 (기한 상한)"
     iso = c3_resolve_deadline(expr, base)
-    return date.fromisoformat(iso) if iso else None
+    return (date.fromisoformat(iso), False, "원문 기한을 날짜로 변환") if iso else (None, False, "기한 확인 필요")
+
+
+def c3_due(expr, base):
+    return c3_deadline_info(expr, base)[0]
 
 
 def c3_label(task, today):
@@ -564,6 +589,8 @@ def c3_task_row(task, location, today):
         content.write(task["name"])
         due = task["due"].isoformat() if task["due"] else "날짜 미정"
         content.caption(f"{c3_label(task, today)} · {due} · {task['kind']}")
+        if task.get("estimated") and not task["manual"]:
+            content.caption("임시 마감일 · 변경 가능")
         action.button("상세 보기", key=f"c3_open_{location}_{task['id']}",
                       on_click=c3_select, args=(task["id"],), use_container_width=True)
 
@@ -596,7 +623,7 @@ def c3_ics(tasks, checkpoints=False):
             lines += ["BEGIN:VEVENT", f"UID:{task['id']}-{before}@aivle",
                       f"DTSTAMP:{stamp}", f"DTSTART;VALUE=DATE:{day:%Y%m%d}",
                       f"DTEND;VALUE=DATE:{day + timedelta(days=1):%Y%m%d}",
-                      "SUMMARY:" + c3_escape(title),
+                      "SUMMARY:" + c3_escape(("[임시] " if task.get("estimated") and not task["manual"] else "") + title),
                       "DESCRIPTION:" + c3_escape("원문 기한: " + (task["expr"] or "기록 없음")),
                       "END:VEVENT"]
     return "\r\n".join(c3_fold(line) for line in lines + ["END:VCALENDAR"]) + "\r\n"
@@ -633,17 +660,26 @@ if st.session_state.get("c3_source") != c3_fingerprint:
         if key.startswith(("c3_done_", "c3_edit_")):
             del st.session_state[key]
 
+# 기존 세션에도 새 날짜 규칙을 한 번 적용 (직접 수정한 날짜는 유지)
+for task in st.session_state.c3_tasks:
+    if "date_rule" not in task:
+        if not task["manual"]:
+            task["due"], task["estimated"], task["date_rule"] = c3_deadline_info(
+                task["expr"], st.session_state.c3_base_used or c3_today())
+        else:
+            task["estimated"], task["date_rule"] = False, "사용자 지정"
+        st.session_state.c3_revision += 1
+
 if page == PAGES[2]:
     today = c3_today()
     st.subheader("📅 업무 일정")
     st.caption("가까운 마감부터 확인하고, 업무를 선택해 날짜와 완료 상태를 관리하세요.")
 
     with st.expander("회의록에서 일정 가져오기", expanded=not st.session_state.c3_extracted):
-        mode = st.radio("상대 날짜 계산 기준", ["오늘 기준", "회의 날짜 직접 지정"],
-                        horizontal=True, key="c3_base_mode")
-        base = today if mode == "오늘 기준" else st.date_input("회의 날짜", value=today, key="c3_base_custom")
-        st.caption(f"이번 추출 기준일: {base.isoformat()} · 연도 없는 월·일에는 이 기준일의 연도를 적용합니다.")
-        st.caption("‘다음 주까지’, ‘다음 달 초’ 등 모호한 기한은 날짜 미정으로 표시합니다. 기준 변경은 다음 추출에 적용됩니다.")
+        base = today
+        st.caption(f"이번 추출 기준일: {base.isoformat()} (한국 시간의 오늘) · 연도 없는 월·일은 올해를 적용합니다.")
+        st.caption("다음 주까지 → 다음 주 금요일 · 다음 달 초 → 다음 달 1일. 모호한 표현은 임시 마감일이며 직접 수정할 수 있습니다.")
+        st.caption("날짜는 추출할 때 고정됩니다. 앱을 다음 날 열어도 마감일이 자동으로 밀리지 않습니다.")
         if st.button("회의록에서 일정 추출 / 갱신", key="c3_extract", type="primary"):
             if not c3_source.strip():
                 st.warning("AI 비서 메뉴에서 회의록을 먼저 업로드해 주세요.")
@@ -673,7 +709,7 @@ if page == PAGES[2]:
                                 **item, "id": uuid.uuid4().hex, "done": False,
                                 "visible": True, "manual": False, "due": None}
                             if not task["manual"]:
-                                task["due"] = c3_due(task["expr"], base)
+                                task["due"], task["estimated"], task["date_rule"] = c3_deadline_info(task["expr"], base)
                             updated.append(task)
                     st.session_state.c3_tasks = updated
                     st.session_state.c3_base_used = base
@@ -779,7 +815,11 @@ if page == PAGES[2]:
                     st.caption(f"{task['kind']} · {c3_label(task, today)}")
                     st.markdown("**회의록의 기한 표현**")
                     st.write(task["expr"] or "기록에 없음")
-                    st.caption("날짜 출처: " + ("사용자 지정" if task["manual"] else "원문에서 변환 / 미정"))
+                    st.caption("날짜 출처: " + ("사용자 지정" if task["manual"] else "임시 마감일" if task.get("estimated") else "원문에서 변환 / 미정"))
+                    if not task["manual"]:
+                        st.caption(task.get("date_rule", ""))
+                    if task.get("estimated") and not task["manual"]:
+                        st.info("회의에서 확정한 날짜가 아닙니다. 아래에서 필요에 맞게 수정하세요.")
                     version = st.session_state.c3_revision
                     key = f"c3_edit_{task['id']}_{version}"
                     with st.form(key):
@@ -789,7 +829,8 @@ if page == PAGES[2]:
                         st.caption("날짜를 지정하려면 ‘기한 미정으로 저장’을 해제하세요.")
                         if st.form_submit_button("변경 저장", type="primary"):
                             new_due = None if no_date else due
-                            task["manual"] = task["manual"] or new_due != task["due"]
+                            task["manual"] = True
+                            task["estimated"] = False
                             task["due"], task["visible"] = new_due, visible
                             st.session_state.c3_revision += 1
                             st.rerun()
