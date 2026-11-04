@@ -4,7 +4,7 @@ import json
 import ssl
 import smtplib
 from email.mime.text import MIMEText
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 import uuid
 
@@ -25,6 +25,41 @@ st.title("🤖 에이블 AI 음성비서")
 st.write("회의록을 업로드하고 음성으로 요청해 주세요.")
 
 RECEIVER_EMAIL = "nay05247777@gmail.com"
+
+# 실행할 때마다 한국의 현재 날짜를 읽습니다. 특정 날짜로 고정하지 않습니다.
+today = datetime.now(ZoneInfo("Asia/Seoul")).date()
+
+
+def build_date_context(base_date):
+    week_start = base_date - timedelta(days=base_date.weekday())
+    weekdays = ["월", "화", "수", "목", "금", "토", "일"]
+    week_dates = []
+    for label, offset in [("이번 주", 0), ("다음 주", 7)]:
+        for index, weekday in enumerate(weekdays):
+            target = week_start + timedelta(days=offset + index)
+            week_dates.append(f"{label} {weekday}요일: {target.isoformat()}")
+    next_month = (base_date.replace(day=28) + timedelta(days=4)).replace(day=1)
+    return f"""
+[날짜 해석 기준: 사용자가 선택한 오늘 기준 모드]
+- 기준 날짜: {base_date.isoformat()} ({weekdays[base_date.weekday()]}요일), Asia/Seoul.
+- 회의록의 '오늘/내일/모레/이번 주/다음 주'는 회의 작성일이 아닌 위 기준 날짜로 해석합니다.
+- 오늘: {base_date.isoformat()}
+- 내일: {(base_date + timedelta(days=1)).isoformat()}
+- 모레: {(base_date + timedelta(days=2)).isoformat()}
+- 이번 달 말일: {(next_month - timedelta(days=1)).isoformat()}
+- 주는 월요일부터 일요일까지입니다.
+{chr(10).join(week_dates)}
+- 연도까지 명시된 날짜는 그대로 유지합니다. 지났다고 미래로 옮기지 않습니다.
+- 연도 없이 월/일만 있으면 기준 연도 {base_date.year}년을 사용합니다. 이 연도 보완 사실을 설명합니다.
+- '금요일'처럼 주가 없으면 오늘을 포함하여 가장 가까운 해당 요일로 해석하고 기준을 설명합니다.
+- '다음 주까지', '조만간', '주말'처럼 정확한 하루가 정해지지 않으면 임의로 날짜를 정하지 않습니다.
+- 기한 자체가 없으면 날짜를 만들지 않습니다.
+- 이전 대화에서 계산한 날짜보다 현재 날짜 규칙과 회의록 원문을 우선합니다.
+"""
+
+
+date_context = build_date_context(today)
+
 
 if not os.getenv("OPENAI_API_KEY"):
     st.error("OPENAI_API_KEY 환경변수를 먼저 설정해 주세요.")
@@ -81,6 +116,8 @@ sys_role = f"""
 - 실패하면 실패 사실을 안내하고 자동으로 재발송하지 않습니다.
 """
 
+
+sys_role += date_context
 
 # ==================================================
 # 3. 이메일 도구 정의
@@ -186,12 +223,16 @@ if "last_audio" not in st.session_state:
 if "tasks" not in st.session_state:
     st.session_state.tasks = []
 
+if "tasks_reference_date" not in st.session_state:
+    st.session_state.tasks_reference_date = None
+
 
 # ==================================================
 # 6. 사이드바
 # ==================================================
 with st.sidebar:
     st.header("⚙️ 비서 설정")
+    st.caption(f"오늘 기준: {today.isoformat()} · 한국 시간")
     st.caption("이메일 수신자")
     st.write(RECEIVER_EMAIL)
 
@@ -340,6 +381,7 @@ if submit and uploaded_file is not None:
             st.session_state.messages = []
             st.session_state.last_audio = None
             st.session_state.tasks = []
+            st.session_state.tasks_reference_date = None
             st.info("새 회의록을 적용하고 이전 대화를 초기화했습니다.")
 
     except UnicodeDecodeError:
@@ -611,15 +653,18 @@ st.caption(
     "같은 그룹에서는 중요도, 마감일 순으로 표시합니다."
 )
 
-today = datetime.now(ZoneInfo("Asia/Seoul")).date()
+st.caption(f"긴급도 계산 기준: {today.isoformat()} · 한국 시간")
+if st.session_state.tasks:
+    reference_date = st.session_state.tasks_reference_date
+    if reference_date != today.isoformat():
+        st.info("기존 목록은 이전 기준으로 생성되었습니다. 오늘 기준 재생성을 눌러 날짜를 갱신하세요.")
+    if reference_date:
+        st.caption(f"마감일 추출 기준일: {reference_date}")
 
-# 기존 목록이 있으면 버튼을 비활성화해 완료 상태 덮어쓰기 방지
+# 기존 목록도 사용자가 원할 때 오늘 기준으로 다시 생성할 수 있습니다.
 if st.button(
-    "회의록에서 체크리스트 만들기",
-    disabled=(
-        not st.session_state.meeting_text
-        or bool(st.session_state.tasks)
-    )
+    "오늘 기준으로 체크리스트 재생성" if st.session_state.tasks else "회의록에서 체크리스트 만들기",
+    disabled=not st.session_state.meeting_text
 ):
     try:
         with st.spinner("담당 업무와 우선순위 근거를 정리하고 있습니다..."):
@@ -638,10 +683,9 @@ if st.button(
 
 [기한]
 - 회의에서 해당 업무의 기한으로 명시한 날짜만 사용합니다.
-- 연도나 날짜를 확정할 수 없으면 due_date는 null입니다.
-- '내일', '다음 주'는 회의 날짜가 명확할 때만 날짜로 변환합니다.
-- 과거 회의일 수 있으므로 오늘을 회의 날짜로 가정하지 않습니다.
-- 기한 원문은 due_evidence에 보존합니다.
+- 아래 날짜 해석 기준을 적용해 YYYY-MM-DD로 변환합니다.
+- 정확한 하루로 확정할 수 없거나 기한이 없으면 due_date는 null입니다.
+- 기한 원문은 due_evidence에 그대로 보존하고, 보완한 연도나 상대 날짜 해석을 괄호로 설명합니다.
 
 [중요도]
 - '핵심', '최우선', '필수'처럼 중요성이 명시되면 높음입니다.
@@ -650,7 +694,7 @@ if st.button(
 - 그 외에는 확인 필요입니다.
 - 마감이 가깝다는 이유만으로 중요도를 높이지 않습니다.
 - 중요도 판단에 사용한 원문을 importance_evidence에 적습니다.
-"""
+""" + date_context
                     },
                     {
                         "role": "user",
@@ -674,11 +718,24 @@ if st.button(
 
             task_data = json.loads(call.arguments)["tasks"]
 
+            old_tasks = {
+                (task["title"], task["detail"]): task
+                for task in st.session_state.tasks
+            }
             for task in task_data:
-                task["id"] = uuid.uuid4().hex
-                task["done"] = False
+                # 잘못된 날짜 문자열이 그대로 화면에 표시되는 것을 방지합니다.
+                if task["due_date"] is not None:
+                    try:
+                        task["due_date"] = date.fromisoformat(task["due_date"]).isoformat()
+                    except (ValueError, TypeError):
+                        task["due_date"] = None
+                        task["due_evidence"] += " (유효하지 않은 날짜: 확인 필요)"
+                old_task = old_tasks.get((task["title"], task["detail"]))
+                task["id"] = old_task["id"] if old_task else uuid.uuid4().hex
+                task["done"] = old_task["done"] if old_task else False
 
             st.session_state.tasks = task_data
+            st.session_state.tasks_reference_date = today.isoformat()
 
         if not task_data:
             st.info("회의록에서 김 대리에게 배정된 업무를 찾지 못했습니다.")
