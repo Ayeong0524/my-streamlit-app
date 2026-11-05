@@ -31,7 +31,6 @@ from pypdf import PdfReader
 from docx import Document
 
 import pandas as pd
-import altair as alt
 import streamlit as st
 from openai import OpenAI
 from email.mime.text import MIMEText
@@ -73,7 +72,7 @@ PAGE_INFO = {
     ],
     "📊 업무 우선순위 분석": [
         "📊 김 대리 업무를 **긴급도 × 중요도**로 나눠 Q1 즉시 착수부터 Q4 후순위 검토까지 **4개 영역**으로 정리합니다.",
-        "🔗 먼저 끝내야 하는 업무를 **선행관계**로 짚어 드리고, 마케팅 **예산 지출 내역**을 그래프로 보여 드립니다.",
+        "🔗 먼저 끝내야 하는 업무를 **선행관계**로 짚어 드리고, 순서를 정할 때 참고할 **판단 근거**도 함께 보여 드립니다.",
     ],
     "📅 마감 캘린더": [
         "📅 '다음 주까지' 같은 회의 표현을 **날짜로 계산**해 마감일과 D-14·D-7·D-1 알림을 **달력**에 표시합니다.",
@@ -99,6 +98,28 @@ PAGE_INFO = {
 
 # 대화 기록 최대 개수 (질문 1 + 답변 1 = 2개 → 20이면 최근 10번의 대화)
 MAX_HISTORY = 20
+
+
+# 메뉴 바로가기: 질문에 이 단어가 들어 있으면 해당 메뉴로 가는 버튼을 보여 줌
+#  - 음성 인식은 띄어쓰기가 달라질 수 있어서 띄어쓰기를 없앤 단어로 비교
+PAGE_KEYWORDS = {
+    "📊 업무 우선순위 분석": ["우선순위"],
+    "📅 마감 캘린더":       ["마감캘린더", "캘린더", "달력"],
+    "📨 팔로업 메일":       ["팔로업", "팔로우업"],
+    "🎧 출근길 브리핑":     ["출근길", "브리핑"],
+    "🍃 오늘의 할 일":      ["오늘의할일", "할일", "칸반"],
+    "🗂️ 회의 자료실":       ["회의자료실", "자료실"],
+}
+
+def find_pages(text):
+    """질문에서 메뉴 이름(키워드)을 찾아, 찾은 메뉴 목록을 메뉴 순서대로 반환"""
+    q = text.replace(" ", "")
+    return [p for p in PAGES if any(word in q for word in PAGE_KEYWORDS.get(p, []))]
+
+def go_page(target):
+    """바로가기 버튼: 사이드바 메뉴 값을 바꿔서 그 메뉴로 이동"""
+    st.session_state.menu = target
+    st.session_state.jump_pages = []      # 이동했으면 버튼은 지움
 
 def kst_today():
     return datetime.now(ZoneInfo("Asia/Seoul")).date()
@@ -253,7 +274,7 @@ def ask_able(question, current_meeting):
 # ══════════════════════════════════════════════════
 st.set_page_config(page_title="AI 개인비서 에이블", page_icon="🤖", layout="wide")
 st.title("🤖 AI 개인비서 에이블")
-st.caption("다중 회의록/업무자료 분석, 스마트 캘린더, 실시간 대화 및 지출/목표 대시보드를 제공합니다.")
+st.caption("다중 회의록/업무자료 분석, 스마트 캘린더, 실시간 대화 및 업무 우선순위 분석을 제공합니다.")
 
 # 소개 영역: 자리만 먼저 만들어 두고, 사이드바에서 메뉴가 정해진 뒤 내용을 채움
 #  (메뉴 선택(page)은 아래 사이드바에서 정해지기 때문에, 그 뒤에 이 자리를 채워야 메뉴별 문구를 보여 줄 수 있음)
@@ -530,7 +551,7 @@ def extract_file_content(uploaded_file):
 # 사이드바 메뉴: 누른 메뉴의 기능만 화면에 표시
 with st.sidebar:
     st.header("🤖 에이블 메뉴")
-    page = st.radio("기능 선택", PAGES, label_visibility="collapsed")
+    page = st.radio("기능 선택", PAGES, label_visibility="collapsed", key="menu")
     st.divider()
 
     # 회의록 업로드 (사이드바에 있어서 어느 메뉴에서든 올리고 바꿀 수 있음)
@@ -812,6 +833,14 @@ if page == PAGES[0]:
                 with st.chat_message(message["role"]):
                     st.markdown(message["content"])
 
+        # 질문에 메뉴 이름이 있었으면 바로가기 버튼 표시 (누르면 사이드바를 누르지 않아도 이동)
+        jump_pages = st.session_state.get("jump_pages", [])
+        if jump_pages:
+            st.caption("🔗 질문에 나온 기능으로 바로 가기")
+            for col, target in zip(st.columns(len(jump_pages)), jump_pages):
+                col.button(f"{target} 열기", key=f"jump_{target}", width="stretch",
+                           on_click=go_page, args=(target,))
+
         # 최근 답변 음성 (새 답변일 때만 자동 재생)
         if st.session_state.last_audio:
             st.audio(st.session_state.last_audio, format="audio/mp3",
@@ -828,6 +857,7 @@ if page == PAGES[0]:
             st.session_state.messages_dict[st.session_state.active_doc] = []
             st.session_state.notice = None
             st.session_state.last_audio = None
+            st.session_state.jump_pages = []
             st.rerun()
 
     # ── 질문 처리: 음성(실행 버튼) 또는 텍스트(보내기 버튼) ──
@@ -859,6 +889,7 @@ if page == PAGES[0]:
                 current_history.append({"role": "assistant", "content": answer})
                 st.session_state.messages_dict[st.session_state.active_doc] = current_history[-MAX_HISTORY:]
                 st.session_state.notice = {"source": source, "question": question, "email": email}
+                st.session_state.jump_pages = find_pages(question)   # 질문 속 메뉴 이름 → 바로가기 버튼
 
                 # LLM 최종 응답을 음성으로 즉시 재생 (미션 5·6 TTS)
                 if voice_on:
@@ -1214,120 +1245,6 @@ elif page == PAGES[1]:
 
         except Exception as e:
             st.error(f"분석 결과 표시 오류: {e}")
-
-    # ----------------------------------------
-    # ④ 마케팅 예산 지출 내역
-    # 목표 진행 상황 표 삭제
-    # 예산 표와 그래프를 화면 전체 너비로 확장
-    # ----------------------------------------
-
-    st.divider()
-
-    st.markdown(
-        "### 💰 마케팅 예산 지출 내역 (총 5,000만 원)"
-    )
-
-    st.caption(
-        "아래 금액은 기존 팀원 코드에 입력된 예산 배분 예시입니다. "
-        "실제 지출 내역과 자동 연동된 데이터는 아닙니다."
-    )
-
-    df_expense = pd.DataFrame({
-        "항목": [
-            "SNS 광고 (인스타/유튜브)",
-            "인플루언서 협업",
-            "숏폼/카드뉴스 제작",
-            "출시 프로모션 이벤트",
-            "예비비"
-        ],
-        "금액(백만원)": [
-            25.0,
-            10.0,
-            8.0,
-            5.0,
-            2.0
-        ]
-    })
-
-    # 예산 비중 자동 계산
-    df_expense["비중(%)"] = (
-        df_expense["금액(백만원)"]
-        / df_expense["금액(백만원)"].sum()
-        * 100
-    ).round(1)
-
-    # 총 예산
-    st.metric(
-        "총 계획 예산",
-        "5,000만 원"
-    )
-    # 예산 표
-    st.dataframe(
-        df_expense[["항목", "금액(백만원)", "비중(%)"]],
-        hide_index=True,
-        use_container_width=True
-    )
-
-    # 예산 그래프: 0부터 시작하는 눈금 + 금액 표시 + X축 45도
-    df_expense["표시금액"] = df_expense["금액(백만원)"].apply(
-        lambda x: f"{x:g}백만원"
-    )
-
-    x_axis = alt.X(
-        "항목:N",
-        sort=None,
-        axis=alt.Axis(
-            title=None,
-            labelAngle=-45,
-            labelAlign="right",
-            labelLimit=250
-        )
-    )
-
-    y_axis = alt.Y(
-        "금액(백만원):Q",
-        scale=alt.Scale(
-            domain=[0, 30],
-            nice=False
-        ),
-        axis=alt.Axis(
-            title="금액 (백만원)",
-            values=[0, 5, 10, 15, 20, 25, 30]
-        )
-    )
-
-    bars = alt.Chart(df_expense).mark_bar(
-        size=55,
-        cornerRadiusTopLeft=5,
-        cornerRadiusTopRight=5
-    ).encode(
-        x=x_axis,
-        y=y_axis,
-        tooltip=[
-            "항목:N",
-            "금액(백만원):Q",
-            "비중(%):Q"
-        ]
-    )
-
-    labels = alt.Chart(df_expense).mark_text(
-        dy=-12,
-        fontSize=13,
-        fontWeight="bold"
-    ).encode(
-        x=x_axis,
-        y=y_axis,
-        text="표시금액:N"
-    )
-
-    chart = (bars + labels).properties(
-        height=400
-    )
-
-    st.altair_chart(
-        chart,
-        width="stretch"
-    )
 
 # ── 사이드바 아래쪽: 회의록 상태 · 저장된 대화 ──
 with st.sidebar:
@@ -2589,7 +2506,6 @@ if page == PAGES[4]:
 #  - 업무 목록은 '📅 마감 캘린더'에서 추출한 일정(st.session_state.schedule)을 그대로 사용
 #  - 진행 상태(status)는 업무마다 저장: 처음 추출하면 모두 TO DO (회의에서 막 배정된 업무라 시작 전)
 #  - DONE으로 옮기면 캘린더의 완료(✅)에도 바로 반영되고, 캘린더에서 완료를 체크해도 DONE에 표시됨
-#  - ⚠️ 아래 '회의 자료실' 셀이 elif로 이어지므로, 이 셀의 마지막 문장은 반드시 if page == PAGES[5]: 블록이어야 함
 # ══════════════════════════════════════════════════════════════
 
 KANBAN_COLUMNS = [
