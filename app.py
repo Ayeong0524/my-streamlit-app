@@ -1893,136 +1893,365 @@ if page == PAGES[2]:
             st.caption(f"마일스톤 {len(rows)}개(D-14, D-7, D-1, D-day)가 담깁니다. "
                        "파일을 열면 Google·Outlook·휴대폰 캘린더에 바로 등록됩니다.")
     # ============================================================
-    # 외부 캘린더 연동 (마감 캘린더 메뉴 전용)
-    # ============================================================
-    # 기능:
-    # 1. 등록된 업무 중 캘린더에 추가할 업무 선택
-    # 2. Google Calendar 일정 등록 화면 열기
-    # 3. Outlook Calendar 일정 등록 화면 열기
-    # 4. 업무명 및 마감일 자동 입력
-    # 5. 사용자 확인 후 외부 캘린더에 저장
-    #
-    # 주의:
-    # 기존 업무 데이터와 .ics 다운로드 기능은 변경하지 않음
-    # ============================================================
+    # [최초 설정: 팀 실습용 서비스 계정 연결]
+    # 1) Colab 설치 셀: !pip install -q google-api-python-client google-auth
+    # 2) Google Cloud 프로젝트에서 Google Calendar API 사용 설정.
+    # 3) 서비스 계정 생성 후 JSON 키를 받아 Colab에 service_account.json으로 업로드.
+    #    키 파일은 팀 공유 코드/Git에 넣지 않습니다.
+    # 4) Google 캘린더 설정에서 사용할 캘린더를 서비스 계정의 client_email에
+    #    '일정 변경' 권한으로 공유. 캘린더 통합 메뉴의 '캘린더 ID' 복사.
+    # 5) Streamlit 실행 전에 Colab에서 아래 환경변수 설정:
+    #    import os
+    #    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = '/content/service_account.json'
+    #    os.environ['GOOGLE_CALENDAR_ID'] = '복사한 캘린더 ID'
+    # 6) 기존 기본 app.py 셀 → 이 캘린더 셀 → 팔로업 → 브리핑 순서로 한 번씩 실행.
+    # Streamlit Cloud: secrets의 gcal_service_account 표에 JSON 키 필드,
+    # GOOGLE_CALENDAR_ID에 캘린더 ID 설정도 지원합니다.
+    # 공유한 캘린더에 이 앱 사용자가 쓸 수 있으므로 팀 실습용 비공개 앱에서 사용하세요.
+    # 일반 사용자별 Google 로그인은 별도의 OAuth 웹 인증 구성이 필요합니다.
+    import os
+    import json
+    import re
 
-    from urllib.parse import urlencode
+
+    def able_google_now_str():
+        return datetime.now(ZoneInfo('Asia/Seoul')).isoformat(timespec='seconds')
+
+
+    def able_google_client():
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        calendar_id = os.getenv('GOOGLE_CALENDAR_ID', '')
+        key_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS', '')
+        scopes = ['https://www.googleapis.com/auth/calendar.events']
+        if key_path:
+            creds = service_account.Credentials.from_service_account_file(key_path, scopes=scopes)
+        else:
+            try:
+                info = dict(st.secrets['gcal_service_account'])
+            except Exception:
+                raise ValueError('Google 연결 설정이 없습니다. 제공한 코드 상단의 최초 설정을 완료해 주세요.') from None
+            creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+        if not calendar_id:
+            try:
+                calendar_id = st.secrets['GOOGLE_CALENDAR_ID']
+            except Exception:
+                raise ValueError('GOOGLE_CALENDAR_ID를 설정해 주세요.') from None
+        if calendar_id == 'primary':
+            raise ValueError('서비스 계정에는 공유한 캘린더의 실제 ID를 입력해 주세요.')
+        return build('calendar', 'v3', credentials=creds, cache_discovery=False), calendar_id
+
+
+    def able_event_payload(task):
+        due = task['due']
+        if isinstance(due, str):
+            due = date.fromisoformat(due[:10])
+        description = '\n'.join([
+            task.get('detail', ''),
+            '종류: ' + task.get('kind', ''),
+            '상태: ' + ('완료' if task.get('done') else '미완료'),
+            '원문 기한: ' + (task.get('expr') or '기록에 없음'),
+            '출처: ' + str(task.get('source', '')),
+            '회의일: ' + str(task.get('meeting_date', '')),
+        ])
+        return {
+            'summary': ('[완료] ' if task.get('done') else '') + task['name'],
+            'description': description,
+            'start': {'date': due.isoformat()},
+            'end': {'date': (due + timedelta(days=1)).isoformat()},
+            'extendedProperties': {'private': {'able_task_id': task['task_id']}},
+        }
+
+
+    def able_sync_google(tasks, service, calendar_id):
+        """한 버튼으로 일괄 처리. 성공한 업무는 유지하고 실패 항목은 별도로 보고."""
+        report = []
+        for task in tasks:
+            if task.get('due') is None or not task.get('use'):
+                continue
+            # 동일 task_id 재시도는 새 이벤트를 만들지 않고 기존 이벤트를 갱신.
+            event_id = 'able' + hashlib.sha256(task['task_id'].encode()).hexdigest()
+            body = able_event_payload(task)
+            try:
+                try:
+                    result = service.events().get(calendarId=calendar_id, eventId=event_id).execute()
+                except Exception as exc:
+                    if getattr(getattr(exc, 'resp', None), 'status', None) != 404:
+                        raise
+                    try:
+                        result = service.events().insert(calendarId=calendar_id,
+                            body={**body, 'id': event_id}, sendUpdates='none').execute()
+                        action = '등록'
+                    except Exception as conflict:
+                        if getattr(getattr(conflict, 'resp', None), 'status', None) != 409:
+                            raise
+                        result = service.events().patch(calendarId=calendar_id, eventId=event_id,
+                            body=body, sendUpdates='none').execute()
+                        action = '수정'
+                else:
+                    if result.get('status') == 'cancelled':
+                        raise ValueError('Google에서 삭제한 일정입니다. 새 업무로 등록해 주세요.')
+                    result = service.events().patch(calendarId=calendar_id, eventId=event_id,
+                        body=body, sendUpdates='none').execute()
+                    action = '수정'
+                task['google_event_id'] = result['id']
+                task['google_synced_at'] = able_google_now_str()
+                report.append({'업무': task['name'], '결과': action + ' 완료', '오류': ''})
+            except Exception as exc:
+                code = getattr(getattr(exc, 'resp', None), 'status', None)
+                reason = {401:'인증 만료 또는 인증 오류',403:'Calendar API 사용 설정·공유 권한을 확인하세요',
+                          404:'캘린더 ID 또는 공유 설정을 확인하세요',429:'요청 제한: 잠시 후 다시 시도하세요'}.get(code)
+                report.append({'업무':task['name'],'결과':'실패',
+                               '오류':reason or (str(exc) if isinstance(exc, ValueError) else '연결 오류: 다시 시도해 주세요')})
+        return report
+
+
+    def able_run_sync():
+        for task in st.session_state.schedule:
+            if not task.get('task_id'):
+                task['task_id'] = str(uuid.uuid4())
+        candidates = [t for t in st.session_state.schedule if t.get('due') is not None and t.get('use')]
+        if not candidates:
+            st.warning('날짜를 정하고 달력 표시를 켠 업무가 없습니다.')
+            return
+        try:
+            service, calendar_id = able_google_client()
+            try:
+                with st.spinner(f'{len(candidates)}개 업무를 Google 캘린더에 저장하고 있습니다…'):
+                    report = able_sync_google(candidates, service, calendar_id)
+            finally:
+                service.close()
+            st.session_state.able_google_report = report
+        except ImportError:
+            st.session_state.able_google_report = [{'업무':'연결','결과':'실패','오류':'google-api-python-client와 google-auth를 설치해 주세요.'}]
+        except Exception as exc:
+            st.session_state.able_google_report = [{'업무':'연결','결과':'실패',
+                '오류':str(exc) if isinstance(exc, ValueError) else 'Google 연결 설정을 확인해 주세요.'}]
+
+
+
+
+    # Outlook 최초 설정 (Microsoft Entra 관리 센터)
+    # 앱 등록 → 새 등록 → 조직 계정 및 개인 Microsoft 계정 지원 선택.
+    # 인증 → 고급 설정 → 퍼블릭 클라이언트 흐름 허용: 예.
+    # API 권한 → Microsoft Graph → 위임 권한 → Calendars.ReadWrite, User.Read.
+    # Colab에서 Streamlit 실행 전에:
+    # os.environ['MICROSOFT_CLIENT_ID'] = '앱의 애플리케이션(클라이언트) ID'
+    # 클라이언트 비밀은 사용하지 않습니다. 조직 정책에 따라 관리자 동의가 필요할 수 있습니다.
+    # 설치: !pip install -q google-api-python-client google-auth requests
+    import time
+    import requests
+    from urllib.parse import quote
+
+    OUTLOOK_SCOPES = 'https://graph.microsoft.com/Calendars.ReadWrite https://graph.microsoft.com/User.Read offline_access'
+    OUTLOOK_TOKEN_URL = 'https://login.microsoftonline.com/common/oauth2/v2.0/token'
+    OUTLOOK_PROP = 'String {c113a684-a529-4c11-92dd-291af61589dc} Name AivleTaskId'
+
+    def able_ms_client_id():
+        value = os.getenv('MICROSOFT_CLIENT_ID', '')
+        if not value:
+            try:
+                value = st.secrets['MICROSOFT_CLIENT_ID']
+            except Exception:
+                pass
+        if not value:
+            raise ValueError('MICROSOFT_CLIENT_ID가 없습니다. 코드의 Outlook 최초 설정을 완료해 주세요.')
+        return value
+
+    def able_graph(method, path, token, **kwargs):
+        response = requests.request(method, 'https://graph.microsoft.com/v1.0' + path,
+            headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
+            timeout=30, **kwargs)
+        if not response.ok:
+            reason = {401:'Outlook에 다시 연결해 주세요.', 403:'캘린더 쓰기 권한 또는 조직 정책을 확인하세요.',
+                      429:'요청이 많습니다. 잠시 후 다시 시도하세요.'}.get(response.status_code, f'Outlook 요청 실패 (HTTP {response.status_code})')
+            raise ValueError(reason)
+        return response.json() if response.content else {}
+
+    def able_store_ms_tokens(data):
+        old = st.session_state.get('able_ms_tokens', {})
+        st.session_state.able_ms_tokens = {
+            'access_token': data['access_token'],
+            'refresh_token': data.get('refresh_token', old.get('refresh_token')),
+            'expires_at': time.time() + int(data.get('expires_in', 3600)),
+            'client_id': able_ms_client_id(),
+        }
+
+    def able_ms_token():
+        data = st.session_state.get('able_ms_tokens')
+        if not data or data.get('client_id') != able_ms_client_id():
+            raise ValueError('먼저 Outlook 계정을 연결해 주세요.')
+        if data['expires_at'] > time.time() + 90:
+            return data['access_token']
+        response = requests.post(OUTLOOK_TOKEN_URL, data={
+            'client_id': able_ms_client_id(), 'grant_type':'refresh_token',
+            'refresh_token':data.get('refresh_token'), 'scope':OUTLOOK_SCOPES}, timeout=30)
+        if not response.ok:
+            st.session_state.pop('able_ms_tokens', None)
+            raise ValueError('Outlook 연결이 만료되었습니다. 다시 연결해 주세요.')
+        able_store_ms_tokens(response.json())
+        return st.session_state.able_ms_tokens['access_token']
+
+    def able_begin_ms_login():
+        response = requests.post('https://login.microsoftonline.com/common/oauth2/v2.0/devicecode',
+            data={'client_id':able_ms_client_id(), 'scope':OUTLOOK_SCOPES}, timeout=30)
+        if not response.ok:
+            raise ValueError('로그인 시작 실패: 앱 ID와 퍼블릭 클라이언트 설정을 확인하세요.')
+        flow = response.json()
+        flow['expires_at'] = time.time() + flow['expires_in']
+        flow['next_poll'] = time.time() + flow.get('interval', 5)
+        flow['client_id'] = able_ms_client_id()
+        st.session_state.able_ms_flow = flow
+
+    def able_check_ms_login():
+        flow = st.session_state.get('able_ms_flow')
+        if not flow or time.time() >= flow['expires_at']:
+            st.session_state.pop('able_ms_flow', None)
+            raise ValueError('인증 코드가 만료되었습니다. 연결 시작을 다시 눌러주세요.')
+        if flow['client_id'] != able_ms_client_id():
+            raise ValueError('앱 설정이 변경되었습니다. 연결을 다시 시작해 주세요.')
+        if time.time() < flow['next_poll']:
+            return '잠시 후 로그인 완료 확인을 다시 눌러주세요.'
+        flow['next_poll'] = time.time() + flow.get('interval', 5)
+        response = requests.post(OUTLOOK_TOKEN_URL, data={
+            'client_id':flow['client_id'], 'grant_type':'urn:ietf:params:oauth:grant-type:device_code',
+            'device_code':flow['device_code']}, timeout=30)
+        data = response.json()
+        if response.ok and 'access_token' in data:
+            # 로그인은 연결만 수행하며 일정 등록 버튼을 대신 실행하지 않습니다.
+            account = able_graph('GET', '/me', data['access_token'], params={'$select':'id,displayName,mail,userPrincipalName'})
+            able_store_ms_tokens(data)
+            st.session_state.able_ms_account = account
+            st.session_state.pop('able_ms_flow', None)
+            st.session_state.pop('able_outlook_report', None)
+            return '연결되었습니다. 아래 등록 버튼으로 일정을 저장하세요.'
+        error = data.get('error')
+        if error == 'authorization_pending':
+            return 'Microsoft 로그인과 권한 동의를 완료한 뒤 다시 눌러주세요.'
+        if error == 'slow_down':
+            flow['interval'] = flow.get('interval', 5) + 5
+            flow['next_poll'] = time.time() + flow['interval']
+            return '인증 확인이 너무 빠릅니다. 잠시 후 다시 눌러주세요.'
+        st.session_state.pop('able_ms_flow', None)
+        raise ValueError('인증이 거부되었거나 만료되었습니다. 연결을 다시 시작해 주세요.')
+
+    def able_outlook_body(task):
+        google = able_event_payload(task)
+        return {
+            'subject': google['summary'],
+            'body': {'contentType':'text', 'content':google['description']},
+            'isAllDay': True,
+            'start': {'dateTime':google['start']['date']+'T00:00:00', 'timeZone':'Korea Standard Time'},
+            'end': {'dateTime':google['end']['date']+'T00:00:00', 'timeZone':'Korea Standard Time'},
+        }
+
+    def able_sync_outlook(tasks, token):
+        report = []
+        for task in tasks:
+            try:
+                identity = hashlib.sha256(task['task_id'].encode()).hexdigest()
+                body = able_outlook_body(task)
+                # ID 표식을 조회하므로 같은 계정에서 재연결해도 기존 일정에 수정합니다.
+                found = able_graph('GET', '/me/calendar/events', token, params={
+                    '$filter':f"singleValueExtendedProperties/Any(ep: ep/id eq '{OUTLOOK_PROP}' and ep/value eq '{identity}')",
+                    '$select':'id', '$top':2}).get('value', [])
+                if len(found) > 1:
+                    raise ValueError('같은 업무 표식의 일정이 여러 개입니다. Outlook에서 중복을 확인해 주세요.')
+                if found:
+                    able_graph('PATCH', '/me/events/'+quote(found[0]['id'], safe=''), token, json=body)
+                    action = '수정 완료'
+                else:
+                    body['transactionId'] = identity
+                    body['singleValueExtendedProperties'] = [{'id':OUTLOOK_PROP, 'value':identity}]
+                    able_graph('POST', '/me/calendar/events', token, json=body)
+                    action = '등록 완료'
+                report.append({'업무':task['name'], '결과':action, '오류':''})
+            except Exception as exc:
+                report.append({'업무':task['name'], '결과':'실패', '오류':str(exc) if isinstance(exc, ValueError) else '연결 오류: 다시 시도해 주세요.'})
+        return report
+
+    def able_calendar_export_tasks(include_checkpoints):
+        outgoing = []
+        for task in st.session_state.schedule:
+            if not task.get('use') or task.get('due') is None:
+                continue
+            if not task.get('task_id'):
+                task['task_id'] = str(uuid.uuid4())
+            item = dict(task)
+            if isinstance(item['due'], str):
+                item['due'] = date.fromisoformat(item['due'][:10])
+            outgoing.append(item)
+            if include_checkpoints:
+                for row in make_milestones(item['name'], item['due'], base_day):
+                    if row['단계'] == 'D-day':
+                        continue
+                    outgoing.append({**item, 'task_id':item['task_id']+'-'+row['단계'],
+                                     'name':row['제목'], 'due':row['날짜']})
+        return outgoing
+
+    def able_render_report(provider, report):
+        failed = sum(r['결과'] == '실패' for r in report)
+        text = f"{provider} 최근 결과: 성공 {len(report)-failed}건 / 실패 {failed}건"
+        st.warning(text) if failed else st.success(text)
+        st.dataframe(report, hide_index=True)
 
     st.divider()
-    st.subheader("🔗 외부 캘린더 연동")
-
-    st.caption(
-        "업무를 선택하면 해당 업무명과 마감일이 입력된 "
-        "Google·Outlook 캘린더 화면으로 이동합니다."
-    )
-
-    # 1. 마감일이 확정된 업무만 선택 목록에 표시
-    calendar_tasks = [
-        task
-        for task in st.session_state.schedule
-        if task.get("due") is not None
-        and task.get("use", False)
-    ]
-
-    if calendar_tasks:
-
-        # 2. 캘린더에 등록할 업무 선택
-        selected_index = st.selectbox(
-            "📌 캘린더에 등록할 업무",
-            range(len(calendar_tasks)),
-            format_func=lambda i: (
-                f"{calendar_tasks[i]['name']} "
-                f"(마감: {calendar_tasks[i]['due']})"
-            ),
-            key="external_calendar_task"
-        )
-
-        selected_task = calendar_tasks[selected_index]
-
-        # 3. 선택한 업무 정보 가져오기
-        task_name = selected_task["name"]
-        task_due = selected_task["due"]
-
-        # 날짜를 YYYY-MM-DD 형식으로 변환
-        if isinstance(task_due, str):
-            task_due = date.fromisoformat(task_due[:10])
-
-        # 외부 캘린더에는 종일 일정으로 등록
-        start_date = task_due
-        end_date = task_due + timedelta(days=1)
-
-        # 4. 일정 상세 설명
-        task_description = (
-            f"업무명: {task_name}\n"
-            f"업무 구분: {selected_task.get('kind', '미정')}\n"
-            f"회의록: {selected_task.get('source', '미정')}\n"
-            f"회의일: {selected_task.get('meeting_date', '미정')}"
-        )
-
-        # ====================================================
-        # Google Calendar 등록 링크
-        # ====================================================
-        google_params = {
-            "action": "TEMPLATE",
-            "text": task_name,
-            "dates": (
-                f"{start_date:%Y%m%d}/"
-                f"{end_date:%Y%m%d}"
-            ),
-            "details": task_description
-        }
-
-        google_url = (
-            "https://calendar.google.com/calendar/render?"
-            + urlencode(google_params)
-        )
-
-        # ====================================================
-        # Outlook Calendar 등록 링크
-        # ====================================================
-        outlook_params = {
-            "path": "/calendar/action/compose",
-            "rru": "addevent",
-            "subject": task_name,
-            "startdt": start_date.isoformat(),
-            "enddt": end_date.isoformat(),
-            "allday": "true",
-            "body": task_description
-        }
-
-        outlook_url = (
-            "https://outlook.live.com/calendar/0/"
-            "deeplink/compose?"
-            + urlencode(outlook_params)
-        )
-
-        # 5. 외부 캘린더 연결 버튼
-        col_google, col_outlook = st.columns(2)
-
-        with col_google:
-            st.link_button(
-                "🔵 Google Calendar에 등록",
-                google_url,
-                use_container_width=True
-            )
-
-        with col_outlook:
-            st.link_button(
-                "🟣 Outlook Calendar에 등록",
-                outlook_url,
-                use_container_width=True
-            )
-
-        st.info(
-            "📅 외부 캘린더에서 일정 내용을 확인하거나 "
-            "수정한 후 저장해 주세요."
-        )
-
-    else:
-        st.info(
-            "마감일이 확정된 업무가 없습니다. "
-            "업무 일정을 먼저 등록해 주세요."
-        )
+    st.subheader('🔗 외부 캘린더에 전체 등록')
+    st.caption('연결 후에는 외부 캘린더의 일정 작성 화면을 열지 않고, 여기서 수정한 내용을 한 번에 저장합니다.')
+    with st.expander('Outlook 계정 연결', expanded=not st.session_state.get('able_ms_tokens')):
+        account = st.session_state.get('able_ms_account')
+        if st.session_state.get('able_ms_tokens') and account:
+            st.success('연결 계정: '+(account.get('mail') or account.get('userPrincipalName') or account.get('displayName','')))
+            if st.button('Outlook 연결 해제', key='able_ms_disconnect'):
+                for key in ('able_ms_tokens','able_ms_flow','able_ms_account','able_outlook_report'):
+                    st.session_state.pop(key, None)
+                st.rerun()
+        else:
+            if st.button('Outlook 연결 시작', key='able_ms_connect'):
+                try:
+                    able_begin_ms_login()
+                except Exception as exc:
+                    st.error(str(exc) if isinstance(exc, ValueError) else '로그인 서버 연결 실패')
+            flow = st.session_state.get('able_ms_flow')
+            if flow:
+                st.write('Microsoft 로그인 화면에 아래 코드를 입력하고 캘린더 권한을 허용하세요.')
+                st.code(flow['user_code'], language=None)
+                st.link_button('Microsoft 로그인 열기', 'https://microsoft.com/devicelogin')
+                if st.button('로그인 완료 확인', key='able_ms_check'):
+                    try:
+                        message = able_check_ms_login()
+                        if st.session_state.get('able_ms_tokens'):
+                            st.rerun()
+                        st.info(message)
+                    except Exception as exc:
+                        st.error(str(exc) if isinstance(exc, ValueError) else '로그인 확인 실패')
+    include_checkpoints = st.checkbox('달력의 사전 점검 일정(D-14·D-7·D-1)도 함께 등록', value=True, key='able_export_checkpoints')
+    export_tasks = able_calendar_export_tasks(include_checkpoints)
+    st.caption(f'전송 대상 {len(export_tasks)}건 · 달력 표시가 켜진 업무의 마감일과 선택한 점검 일정 · 완료 업무 포함')
+    st.caption('Google은 설정한 캘린더, Outlook은 연결 계정의 기본 캘린더에 저장합니다. 각 버튼은 해당 서비스에만 저장합니다.')
+    cg, co = st.columns(2)
+    if cg.button('🔵 Google Calendar에 등록', key='external_google_bulk', type='primary', disabled=not export_tasks, use_container_width=True):
+        try:
+            service, calendar_id = able_google_client()
+            try:
+                with st.spinner('전체 일정을 Google에 등록·수정하고 있습니다…'):
+                    st.session_state.able_google_report = able_sync_google(export_tasks, service, calendar_id)
+            finally:
+                service.close()
+        except Exception as exc:
+            st.session_state.able_google_report = [{'업무':'연결','결과':'실패','오류':str(exc) if isinstance(exc, ValueError) else 'Google 설치·인증 설정을 확인해 주세요.'}]
+    if co.button('🟣 Outlook Calendar에 등록', key='external_outlook_bulk', type='primary', disabled=not export_tasks or not st.session_state.get('able_ms_tokens'), use_container_width=True):
+        try:
+            token = able_ms_token()
+            with st.spinner('전체 일정을 Outlook에 등록·수정하고 있습니다…'):
+                st.session_state.able_outlook_report = able_sync_outlook(export_tasks, token)
+        except Exception as exc:
+            st.session_state.able_outlook_report = [{'업무':'연결','결과':'실패','오류':str(exc) if isinstance(exc, ValueError) else 'Outlook 연결을 확인해 주세요.'}]
+    for provider, key in [('Google','able_google_report'),('Outlook','able_outlook_report')]:
+        if st.session_state.get(key):
+            able_render_report(provider, st.session_state[key])
+    st.caption('기한 미정·표시 해제 일정은 전송하지 않습니다. 기존 외부 일정은 자동 삭제하지 않으며, 날짜 변경으로 달력에서 제외된 과거 점검 일정도 남을 수 있습니다.')
+    st.caption('같은 업무 ID를 유지하는 동안 기존 일정을 수정합니다. Streamlit 세션 초기화 후 일정을 다시 추출하면 업무 ID가 바뀌어 중복될 수 있습니다.')
 
 # ══════════════════════════════════════════════════════════════
 # 메뉴 4: 팔로업 메일 초안 자동 생성 & 원클릭 승인
