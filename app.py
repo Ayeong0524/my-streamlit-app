@@ -31,6 +31,7 @@ from pypdf import PdfReader
 from docx import Document
 
 import pandas as pd
+import altair as alt
 import streamlit as st
 from openai import OpenAI
 from email.mime.text import MIMEText
@@ -45,12 +46,59 @@ MY_EMAIL = "soulsky0218@gmail.com" #수정필요 (기본수신 이메일)
 # 에이블 대표 이미지 경로 (app.py와 같은 폴더에 둔 파일 이름)
 IMAGE_PATH = "able.png"
 
+# 메뉴별 에이블 이미지 (images 폴더에 둔 파일 이름)
+#  - 메뉴 이름(PAGES)을 키로 사용, 사진을 바꾸려면 같은 이름으로 파일만 교체하면 됨
+#  - 파일이 없으면 기본 이미지(IMAGE_PATH)를 대신 보여 줌
+IMAGE_DIR = "images"
+PAGE_IMAGES = {
+    "🎙️ AI 비서":          "07_기본자세.png",    # 맞이하는 기본 자세
+    "📊 업무 우선순위 분석": "02_노트북_분석.png",  # 노트북과 차트로 분석
+    "📅 마감 캘린더":       "01_엄지척_칭찬.png",  # 일정 챙겼어요 👍
+    "📨 팔로업 메일":       "03_고민_질문.png",    # 누구에게 무엇을 물어볼지
+    "🎧 출근길 브리핑":     "06_명상_휴식.png",    # 편하게 듣는 출근길
+    "🍃 오늘의 할 일":      "04_기쁨_응원.png",    # 오늘도 화이팅
+    "🗂️ 회의 자료실":       "05_독서_학습.png",    # 지난 회의록 읽기
+}
+
 # 사이드바 메뉴 (아래 셀들도 이 이름으로 화면을 나눔)
 PAGES = ["🎙️ AI 비서", "📊 업무 우선순위 분석", "📅 마감 캘린더", "📨 팔로업 메일", "🎧 출근길 브리핑",
          "🍃 오늘의 할 일", "🗂️ 회의 자료실"]
 
-# 대화 기록 최대 개수 (질문 1 + 답변 1 = 2개 → 10이면 최근 5번의 대화)
-MAX_HISTORY = 10
+# 메뉴별 소개 문구 (제목 아래 소개 영역에 '지금 메뉴'의 역할 두 줄만 표시)
+#  - 메뉴 이름(PAGES)을 키로 쓰므로, 메뉴를 추가하면 여기에도 한 줄 추가
+PAGE_INFO = {
+    "🎙️ AI 비서": [
+        "📝 회의록·업무자료(TXT·PDF·Word·Excel·한글·음성)를 분석해 **요약하고 김 대리 업무를 찾아** 드립니다.",
+        "🎙️ **음성이나 대화로 질문**하면 글과 음성으로 답하고, 요청하면 **이메일**로 보내 드립니다.",
+    ],
+    "📊 업무 우선순위 분석": [
+        "📊 김 대리 업무를 **긴급도 × 중요도**로 나눠 Q1 즉시 착수부터 Q4 후순위 검토까지 **4개 영역**으로 정리합니다.",
+        "🔗 먼저 끝내야 하는 업무를 **선행관계**로 짚어 드리고, 마케팅 **예산 지출 내역**을 그래프로 보여 드립니다.",
+    ],
+    "📅 마감 캘린더": [
+        "📅 '다음 주까지' 같은 회의 표현을 **날짜로 계산**해 마감일과 D-14·D-7·D-1 알림을 **달력**에 표시합니다.",
+        "🗂️ 회의록을 바꿔 추출해도 일정이 **중복 없이 쌓이고**, **.ics 캘린더 파일**로 내 캘린더에 옮길 수 있습니다.",
+    ],
+    "📨 팔로업 메일": [
+        "📨 김 대리 업무에 필요한 자료를 **누구에게 받아야 하는지** 회의 발언에서 찾아 요청 메일 초안을 씁니다.",
+        "✅ 초안을 확인·수정한 뒤 **승인해야만 발송**되어, 잘못된 메일이 나가지 않습니다.",
+    ],
+    "🎧 출근길 브리핑": [
+        "🎧 회의 결론과 먼저 챙길 일만 골라 **1분 라디오 브리핑** 원고로 정리합니다.",
+        "🔊 원하는 목소리로 들려 드리고, **MP3로 저장**해 출근길에 이어폰으로 들을 수 있습니다.",
+    ],
+    "🍃 오늘의 할 일": [
+        "🍃 김 대리 업무를 **TO DO · DOING · DONE** 보드에 놓고, 버튼 하나로 진행 상태를 옮깁니다.",
+        "✅ 완료한 업무는 **마감 캘린더에도 바로 반영**되고, 기한 미정 업무도 카드에서 확인할 수 있습니다.",
+    ],
+    "🗂️ 회의 자료실": [
+        "🗂️ 업로드한 회의록을 **등록 시각별로 보관**하고, 원문을 언제든 다시 열어 볼 수 있습니다.",
+        "📥 지난 회의록을 **현재 작업 문서로 다시 불러오거나**, 필요 없는 자료를 삭제할 수 있습니다.",
+    ],
+}
+
+# 대화 기록 최대 개수 (질문 1 + 답변 1 = 2개 → 20이면 최근 10번의 대화)
+MAX_HISTORY = 20
 
 # 주석 추가 ~~~
 def kst_today():
@@ -136,73 +184,6 @@ tools = [{
     "strict": True
 }]
 
-# ── 업무 우선순위 분석용 출력 스키마 (05 실습 JSON 구조화) ──
-priority_schema = {
-    "type": "json_schema",
-    "name": "priority",
-    "schema": {
-        "type": "object",
-        "properties": {
-            "업무목록": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "업무명": {"type": "string"},
-                        "기한": {"type": ["string", "null"]},
-                        "긴급도": {"type": "string", "enum": ["높음", "낮음"]},
-                        "중요도": {"type": "string", "enum": ["높음", "낮음"]},
-                        "근거": {"type": "string"}
-                    },
-                    "required": ["업무명", "기한", "긴급도", "중요도", "근거"],
-                    "additionalProperties": False
-                }
-            },
-            "참석자별업무": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "이름": {"type": "string"},
-                        "업무수": {"type": "integer"}
-                    },
-                    "required": ["이름", "업무수"],
-                    "additionalProperties": False
-                }
-            }
-        },
-        "required": ["업무목록", "참석자별업무"],
-        "additionalProperties": False
-    }
-}
-
-# 우선순위 분석 프롬프트 템플릿
-priority_template = """
-다음 회의록을 분석하세요.
-
-1. 김 대리에게 배정된 업무를 모두 추출하세요.
-   - 기한은 회의록에서 해당 업무에 명시된 표현 그대로 적고, 없으면 null로 하세요.
-   - 긴급도: 기한이 가깝거나 회의에서 서둘러야 한다고 언급되면 '높음', 아니면 '낮음'
-   - 중요도: 신제품 출시와 매출에 직접 영향을 주면 '높음', 보조 업무면 '낮음'
-   - 근거: 판단 이유를 회의록 내용에 근거해 한 문장으로 쓰세요.
-2. 회의 참석자(김 대리 포함)별로 새로 배정된 업무 수를 세세요.
-   업무를 전달하거나 회의록을 정리하는 일은 업무로 세지 않습니다.
-
-회의록에 없는 내용은 지어내지 마세요.
-
-[회의록]
-{meeting}
-"""
-
-# 긴급도 × 중요도 → 분류 (파이썬으로 정해서 결과 일관되게)
-def classify(urgent, important):
-    if urgent == "높음" and important == "높음":
-        return "즉시 착수"
-    elif important == "높음":
-        return "순차 진행"
-    else:
-        return "위임 검토"
-
 # ── 이메일 요청인지 판단 ('메일' + '보내다/전송/발송'이 함께 있어야 요청으로 봄) ──
 def wants_email(question):
     q = question.replace(" ", "")                        # '이 메일로'처럼 띄어 써도 인식
@@ -275,20 +256,9 @@ st.set_page_config(page_title="AI 개인비서 에이블", page_icon="🤖", lay
 st.title("🤖 AI 개인비서 에이블")
 st.caption("다중 회의록/업무자료 분석, 스마트 캘린더, 실시간 대화 및 지출/목표 대시보드를 제공합니다.")
 
-# 소개 영역: 왼쪽 이미지 / 오른쪽 역할·핵심 기능
-left, right = st.columns([1, 5])
-with left:
-    if os.path.exists(IMAGE_PATH):
-        st.image(IMAGE_PATH, width=180)
-    else:
-        st.info("🖼️ 이미지 준비 중")
-with right:
-    st.markdown("""
-#### 김 대리의 AI 개인비서, 에이블
-- 📝 회의록을 분석해 **요약하고 내 업무를 찾아** 드립니다.
-- 🎙️ **음성이나 대화로 질문**하면 글과 음성으로 답하고, 요청 시 **이메일**로 보냅니다.
-- 📅 업무 **우선순위**를 정리하고 마감일을 **캘린더**에 표시합니다.
-""")
+# 소개 영역: 자리만 먼저 만들어 두고, 사이드바에서 메뉴가 정해진 뒤 내용을 채움
+#  (메뉴 선택(page)은 아래 사이드바에서 정해지기 때문에, 그 뒤에 이 자리를 채워야 메뉴별 문구를 보여 줄 수 있음)
+intro_area = st.container()
 st.divider()
 
 # 세션 상태 초기화 (S04: 처음 한 번만)
@@ -623,6 +593,14 @@ with st.sidebar:
                     # 현재 작업 대상으로 선택
                     st.session_state.active_doc = uf.name
 
+                    # 회의 자료실에 등록 시각과 함께 보관 (작업 목록에서 지워도 자료실에는 남음)
+                    st.session_state.archived_meetings.append({
+                        "document_id": str(uuid.uuid4()),
+                        "time": kst_now_str(),
+                        "title": uf.name,
+                        "content": content
+                    })
+
                     loaded_count += 1
 
                 except Exception as e:
@@ -631,13 +609,9 @@ with st.sidebar:
                         f"'{uf.name}' 파일 처리 오류: {e}"
                     )
 
+        # 새로 등록한 파일이 있을 때만 한 번 안내 (같은 안내가 두 번·매번 뜨지 않게)
         if loaded_count > 0:
-
-            st.success(
-                f"{loaded_count}개 파일 로드 완료!"
-            )
-
-        st.success(f"{len(uploaded_files)}개 파일 로드 완료!")
+            st.success(f"{loaded_count}개 파일 로드 완료!")
 
     # ============================================================
     # 현재 작업 대상 문서 선택 및 삭제
@@ -780,6 +754,20 @@ with st.sidebar:
 
 current_meeting = st.session_state.uploaded_docs.get(st.session_state.active_doc, "")
 
+# ── 제목 아래 소개 영역 채우기: 왼쪽 메뉴별 이미지 / 오른쪽 '지금 메뉴'의 역할 두 줄 ──
+with intro_area:
+    left, right = st.columns([1, 5])
+    with left:
+        files = sorted(f for f in os.listdir(IMAGE_DIR) if f.lower().endswith(".png")) if os.path.isdir(IMAGE_DIR) else []
+        img = os.path.join(IMAGE_DIR, files[PAGES.index(page) % len(files)]) if files else IMAGE_PATH
+        if os.path.isfile(img):
+            st.image(img, width=180)
+        else:
+            st.info("🖼️ 이미지 준비 중")
+    with right:
+        lines = PAGE_INFO.get(page, [])
+        st.markdown("#### 김 대리의 AI 개인비서, 에이블\n" + "\n".join(f"- {line}" for line in lines))
+
 
 # ══════════════════════════════════════════════════
 # 메뉴 1: AI 비서 (회의록 · 음성 요청 · 실시간 대화)
@@ -888,13 +876,19 @@ if page == PAGES[0]:
             col_right.error(f"오류: {e}")
 
 
-# ══════════════════════════════════════════════════
-# 메뉴 2: 업무 우선순위 & 목 분석 (아이젠하워 매트릭스)
-# ══════════════════════════════════════════════════
-elif page == PAGES[1]:
-    st.subheader("📊 업무 우선순위 & 목표 분석")
-    st.caption("선택된 회의록에서 김 대리 업무를 긴급도 × 중요도로 분류하고, 신제품 마케팅 지출 내역 및 주요 목표 진행 상황 대시보드를 시각화합니다.")
+# ============================================================
+# 메뉴 2: 업무 우선순위 분석 + 마케팅 예산 대시보드
+# ============================================================
 
+elif page == PAGES[1]:
+
+    st.subheader("📊 업무 우선순위 분석")
+    st.caption(
+        "김 대리의 업무를 긴급도·중요도로 분류하고 "
+        "업무 간 선행관계를 분석합니다."
+    )
+
+    # 업무 집중도 제거 / 선행관계 추가
     priority_schema = {
         "type": "json_schema",
         "name": "priority",
@@ -908,180 +902,448 @@ elif page == PAGES[1]:
                         "properties": {
                             "업무명": {"type": "string"},
                             "기한": {"type": ["string", "null"]},
-                            "긴급도": {"type": "string", "enum": ["높음", "낮음"]},
-                            "중요도": {"type": "string", "enum": ["높음", "낮음"]},
+                            "긴급도": {
+                                "type": "string",
+                                "enum": ["높음", "낮음"]
+                            },
+                            "중요도": {
+                                "type": "string",
+                                "enum": ["높음", "낮음"]
+                            },
                             "근거": {"type": "string"}
                         },
-                        "required": ["업무명", "기한", "긴급도", "중요도", "근거"],
+                        "required": [
+                            "업무명", "기한", "긴급도",
+                            "중요도", "근거"
+                        ],
                         "additionalProperties": False
                     }
                 },
-                "참석자별업무": {
+                "선행관계": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "이름": {"type": "string"},
-                            "업무수": {"type": "integer"}
+                            "선행업무": {"type": "string"},
+                            "후행업무": {"type": "string"},
+                            "관계유형": {
+                                "type": "string",
+                                "enum": ["명시", "추정"]
+                            },
+                            "근거": {"type": "string"}
                         },
-                        "required": ["이름", "업무수"],
+                        "required": [
+                            "선행업무", "후행업무",
+                            "관계유형", "근거"
+                        ],
                         "additionalProperties": False
                     }
                 }
             },
-            "required": ["업무목록", "참석자별업무"],
+            "required": ["업무목록", "선행관계"],
             "additionalProperties": False
         }
     }
 
+    # 우선순위 및 선행관계 분석 프롬프트
     priority_template = """
 다음 회의록을 분석하세요.
-1. 김 대리에게 배정된 업무를 모두 추출하세요 (기한, 긴급도, 중요도, 상세 근거).
-2. 참석자별 배정 업무 수를 세세요.
+
+1. 김 대리에게 배정된 업무를 모두 추출하세요.
+
+- 기한은 회의록에 명시된 표현 그대로 작성하고,
+  없으면 null로 작성하세요.
+- 긴급도: 마감일이 가깝거나 서둘러야 한다고 언급되면
+  '높음', 아니면 '낮음'
+- 중요도: 신제품 출시와 매출에 직접 영향을 주면
+  '높음', 보조 업무면 '낮음'
+- 판단 이유는 회의록 내용을 근거로 작성하세요.
+
+2. 김 대리의 업무 간 선행관계를 분석하세요.
+
+- A 업무의 결과가 B 업무의 시작 또는 완료에 필요한
+  경우에만 선행관계를 작성하세요.
+- 선행업무와 후행업무는 업무목록의 이름과
+  동일하게 작성하세요.
+- 회의록에 의존관계가 명확히 언급되면 '명시',
+  업무 내용상 예상되면 '추정'으로 분류하세요.
+- 단순히 우선순위가 높다는 이유로
+  선행관계를 만들지 마세요.
+- 서로 순환하는 선행관계를 만들지 마세요.
+- 관계를 찾을 수 없으면 빈 배열 []을 반환하세요.
+- 각 관계의 판단 근거를 작성하세요.
+- AI 추정은 확정된 사실처럼 표현하지 마세요.
+
+3. 분석 규칙
+
+- 회의록에 없는 업무나 마감일을 만들지 마세요.
+- 명시된 사실과 AI 추정을 구분하세요.
+- 다른 직원에게 업무를 위임하도록 추천하지 마세요.
 
 [회의록]
 {meeting}
 """
-    def classify(urgent, important):
-        if urgent == "높음" and important == "높음": return "즉시 착수"
-        elif important == "높음": return "순차 진행"
-        else: return "위임 검토"
 
-    if st.button("우선순위 분석"): # 수정 : 12번 검증 셀 문자열과 일치하도록 type="primary"를 제거해도 되는지?
+    # 아이젠하워 매트릭스 4분면
+    def classify(urgent, important):
+
+        if urgent == "높음" and important == "높음":
+            return "Q1 · 즉시 착수"
+
+        elif urgent == "낮음" and important == "높음":
+            return "Q2 · 일정 확보"
+
+        elif urgent == "높음" and important == "낮음":
+            return "Q3 · 신속 처리 검토"
+
+        else:
+            return "Q4 · 후순위 검토"
+
+    # 분석 실행
+    if st.button("우선순위 분석"):
+
         if not current_meeting:
             st.warning("먼저 회의록 파일을 업로드해 주세요.")
+
         else:
             try:
-                with st.spinner("업무를 분석하고 있습니다.."):
+                with st.spinner("업무를 분석하고 있습니다..."):
+
                     response = client.responses.create(
                         model="gpt-4o-mini",
-                        input=[{"role": "user",
-                                "content": priority_template.format(meeting=current_meeting)}],
-                        text={"format": priority_schema},   # 정해진 JSON 형식으로만 답변
+                        input=[{
+                            "role": "user",
+                            "content": priority_template.format(
+                                meeting=current_meeting
+                            )
+                        }],
+                        text={"format": priority_schema},
                         temperature=0
                     )
-                    data = json.loads(response.output_text)   # JSON 문자열 → 딕셔너리
-                    st.session_state[f"priority_data_{st.session_state.active_doc}"] = data # 주석 추가가ㅏㅏ
+
+                    data = json.loads(response.output_text)
+
+                    st.session_state[
+                        f"priority_data_{st.session_state.active_doc}"
+                    ] = data
+
             except Exception as e:
                 st.error(f"분석 오류: {e}")
 
-    # ── ① 업무 집중도 (R&R 밸런스) ──────────
-    pdata = st.session_state.get(f"priority_data_{st.session_state.active_doc}")
+    # 문서별 분석 결과 유지
+    pdata = st.session_state.get(
+        f"priority_data_{st.session_state.active_doc}"
+    )
+
     if pdata:
+
         try:
-            df_people = pd.DataFrame(pdata["참석자별업무"])
-            kim = df_people[df_people["이름"].str.contains("김")]["업무수"].sum() if not df_people.empty else 0
-            total = df_people["업무수"].sum() if not df_people.empty else 1
-
-            st.markdown("#### ⚖️ 업무 집중도")
-            col1, col2 = st.columns(2)
-            col1.metric("김 대리 배정 업무", f"{kim}건")
-            col2.metric("전체 배정 업무 중 비중",
-                        f"{kim / total * 100:.0f}%" if total else "-") # if total else 삭제할까 말까...?
-
-            # 김 대리 업무가 3건 이상이거나 절반 이상이면 경보
-            if kim >= 3 or (total and kim / total >= 0.5):
-                st.error("🚨 김 대리에게 업무가 집중되어 있습니다. 우선순위와 위임을 검토하세요.")
-            else:
-                st.success("업무 배분이 적정한 수준입니다.")
-
-            st.bar_chart(df_people.set_index("이름")["업무수"])
-
-            # ── ② 우선순위 매트릭스 ──────────────────
             df_task = pd.DataFrame(pdata["업무목록"])
-            df_task["기한"] = df_task["기한"].fillna("기한 미정").replace("null", "기한 미정")
-            df_task["분류"] = df_task.apply(
-                lambda r: classify(r["긴급도"], r["중요도"]), axis=1)
 
-            st.markdown("#### 🗂️ 우선순위 가이드")
-            cols = st.columns(3)
-            for col, group, icon in zip(cols,
-                                        ["즉시 착수", "순차 진행", "위임 검토"],
-                                        ["🔴", "🟡", "🔵"]):
-                col.markdown(f"**{icon} {group}**")
-                tasks = df_task[df_task["분류"] == group]
-                if tasks.empty:
-                    col.caption("해당 업무 없음")
-                for _, t in tasks.iterrows():
-                    col.info(f"**{t['업무명']}**\n\n⏰ {t['기한']}")
+            if not df_task.empty:
 
-            # ── ③ 상세 분석 표 ───────────────────────
-            st.markdown("#### 📋 상세 분석 표")
-            st.dataframe(df_task[["분류", "업무명", "기한", "긴급도", "중요도", "근거"]],
-                         column_config={
-                             "근거": st.column_config.TextColumn("분석 근거 및 배경", width="large"),
-                             "업무명": st.column_config.TextColumn("배정 업무명", width="medium")
-                         },
-                         use_container_width=True,
-                         hide_index=True
-            )
-            st.caption("※ 중요도는 회의 내용을 바탕으로 한 에이블의 판단입니다.")
+                df_task["기한"] = (
+                    df_task["기한"]
+                    .fillna("기한 미정")
+                    .replace("null", "기한 미정")
+                )
+
+                df_task["분류"] = df_task.apply(
+                    lambda row: classify(
+                        row["긴급도"],
+                        row["중요도"]
+                    ),
+                    axis=1
+                )
+
+                # ----------------------------------------
+                # ① 아이젠하워 매트릭스
+                # ----------------------------------------
+
+                st.markdown(
+                    "#### 📊 업무 우선순위 분석 결과"
+                )
+
+                st.caption(
+                    "긴급도와 중요도에 따라 "
+                    "4개 영역으로 분류합니다."
+                )
+
+                def show_quadrant(
+                    title, urgent, important, guide
+                ):
+
+                    matched = df_task[
+                        (df_task["긴급도"] == urgent)
+                        & (df_task["중요도"] == important)
+                    ]
+
+                    with st.container(border=True):
+
+                        st.markdown(f"**{title}**")
+                        st.caption(guide)
+
+                        if matched.empty:
+                            st.write("해당 업무 없음")
+
+                        else:
+                            for _, task in matched.iterrows():
+
+                                st.markdown(
+                                    f"- **{task['업무명']}**"
+                                    f"  \n  ⏰ {task['기한']}"
+                                )
+
+                # 첫 번째 행
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    show_quadrant(
+                        "🔴 Q1 · 즉시 착수",
+                        "높음",
+                        "높음",
+                        "중요하고 긴급한 업무"
+                    )
+
+                with col2:
+                    show_quadrant(
+                        "🔵 Q2 · 일정 확보",
+                        "낮음",
+                        "높음",
+                        "중요하지만 긴급하지 않은 업무"
+                    )
+
+                # 두 번째 행
+                col3, col4 = st.columns(2)
+
+                with col3:
+                    show_quadrant(
+                        "🟠 Q3 · 신속 처리 검토",
+                        "높음",
+                        "낮음",
+                        "긴급하지만 중요도가 낮은 업무"
+                    )
+
+                with col4:
+                    show_quadrant(
+                        "⚪ Q4 · 후순위 검토",
+                        "낮음",
+                        "낮음",
+                        "중요도와 긴급도가 낮은 업무"
+                    )
+
+                # ----------------------------------------
+                # ② 판단 근거
+                # ----------------------------------------
+
+                st.markdown("#### 📋 판단 근거")
+
+                st.dataframe(
+                    df_task[[
+                        "분류",
+                        "업무명",
+                        "기한",
+                        "긴급도",
+                        "중요도",
+                        "근거"
+                    ]],
+                    column_config={
+                        "근거": st.column_config.TextColumn(
+                            "분석 근거 및 배경",
+                            width="large"
+                        ),
+                        "업무명": st.column_config.TextColumn(
+                            "배정 업무명",
+                            width="medium"
+                        )
+                    },
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+                st.caption(
+                    "※ 긴급도와 중요도는 회의록을 "
+                    "바탕으로 한 AI 판단입니다."
+                )
+
+            else:
+                st.info(
+                    "김 대리에게 배정된 업무가 없습니다."
+                )
+
+            # ----------------------------------------
+            # ③ 업무 선행관계
+            # ----------------------------------------
+
+            st.markdown("#### 🔗 업무 선행관계")
+
+            relations = pdata.get("선행관계", [])
+
+            if relations:
+
+                for relation in relations:
+
+                    before = relation["선행업무"]
+                    after = relation["후행업무"]
+                    relation_type = relation["관계유형"]
+                    reason = relation["근거"]
+
+                    st.markdown(
+                        f"**{before}** → **{after}**"
+                    )
+
+                    st.caption(
+                        f"관계유형: {relation_type}"
+                    )
+
+                    st.write(
+                        f"**판단 근거:** {reason}"
+                    )
+
+                    st.divider()
+
+                st.caption(
+                    "※ '추정' 관계는 실제 업무 의존성 "
+                    "확인이 필요합니다."
+                )
+
+            else:
+                st.info(
+                    "회의록에서 확인하거나 추정할 수 있는 "
+                    "업무 선행관계가 없습니다."
+                )
 
         except Exception as e:
-            st.error(f"오류가 발생했습니다: {e}")
+            st.error(f"분석 결과 표시 오류: {e}")
 
+    # ----------------------------------------
+    # ④ 마케팅 예산 지출 내역
+    # 목표 진행 상황 표 삭제
+    # 예산 표와 그래프를 화면 전체 너비로 확장
+    # ----------------------------------------
 
-    # ── ④ 시각화 대시보드: 지출 내역 & 목표 진행 상황] ──
     st.divider()
-    st.markdown("### 📈 마케팅 지출 내역 및 목표 진행 상황 대시보드")
 
-    col_dash1, col_dash2 = st.columns([1, 1], gap="large")
+    st.markdown(
+        "### 💰 마케팅 예산 지출 내역 (총 5,000만 원)"
+    )
 
-    with col_dash1:
-        st.markdown("#### 💰 마케팅 예산 지출 내역 (총 5,000만 원)")
-        st.caption("회의록에 명시된 5천만 원 예산 배분 구성")
+    st.caption(
+        "아래 금액은 기존 팀원 코드에 입력된 예산 배분 예시입니다. "
+        "실제 지출 내역과 자동 연동된 데이터는 아닙니다."
+    )
 
-        # 지출 데이터프레임
-        df_expense = pd.DataFrame({
-            "항목": ["SNS 광고 (인스타/유튜브)", "인플루언서 협업", "숏폼/카드뉴스 제작", "출시 프로모션 이벤트", "예비비"],
-            "금액(백만원)": [25.0, 10.0, 8.0, 5.0, 2.0]
-        })
+    df_expense = pd.DataFrame({
+        "항목": [
+            "SNS 광고 (인스타/유튜브)",
+            "인플루언서 협업",
+            "숏폼/카드뉴스 제작",
+            "출시 프로모션 이벤트",
+            "예비비"
+        ],
+        "금액(백만원)": [
+            25.0,
+            10.0,
+            8.0,
+            5.0,
+            2.0
+        ]
+    })
 
-        # Streamlit 내장 도넛/파이 대용 시각화 및 지표
-        c_tot1, c_tot2 = st.columns([1, 2])
-        c_tot1.metric("총 집행 예산", "₩50M", delta="전체 100%")
-        c_tot2.dataframe(df_expense, hide_index=True, use_container_width=True)
-        st.bar_chart(df_expense.set_index("항목")["금액(백만원)"])
+    # 예산 비중 자동 계산
+    df_expense["비중(%)"] = (
+        df_expense["금액(백만원)"]
+        / df_expense["금액(백만원)"].sum()
+        * 100
+    ).round(1)
 
-    with col_dash2:
-        st.markdown("#### 🎯 김 대리 목표 진행 상황 (목표 달성률 %)")
-        st.caption("배정된 3대 핵심 과업 및 출시 일정 기준 진행 현황")
+    # 총 예산
+    st.metric(
+        "총 계획 예산",
+        "5,000만 원"
+    )
+    # 예산 표
+    st.dataframe(
+        df_expense[["항목", "금액(백만원)", "비중(%)"]],
+        hide_index=True,
+        use_container_width=True
+    )
 
-        df_goals = pd.DataFrame({
-            "핵심 목표 및 마일스톤": [
-                "경쟁사 A사 온라인 마케팅 사례 분석",
-                "신제품 기능 강조 숏폼/후기 초안 작성",
-                "중급 인플루언서 3인 후보군 섭외 조사",
-                "출시 2주 전 티저 광고 개시 준비",
-                "출시 기념 할인 & SNS 공유 프로모션"
-            ],
-            "진행률(%)": [85, 60, 45, 30, 20]
-        })
+    # 예산 그래프: 0부터 시작하는 눈금 + 금액 표시 + X축 45도
+    df_expense["표시금액"] = df_expense["금액(백만원)"].apply(
+        lambda x: f"{x:g}백만원"
+    )
 
-        # 수평형 바 차트 형태로 진행률 시각화
-        st.dataframe(
-            df_goals,
-            column_config={
-                "진행률(%)": st.column_config.ProgressColumn(
-                    "진행 상황 (%)",
-                    format="%d%%",
-                    min_value=0,
-                    max_value=100
-                ),
-                "핵심 목표 및 마일스톤": st.column_config.TextColumn("추진 과제", width="large")
-            },
-            hide_index=True,
-            use_container_width=True
+    x_axis = alt.X(
+        "항목:N",
+        sort=None,
+        axis=alt.Axis(
+            title=None,
+            labelAngle=-45,
+            labelAlign="right",
+            labelLimit=250
         )
+    )
+
+    y_axis = alt.Y(
+        "금액(백만원):Q",
+        scale=alt.Scale(
+            domain=[0, 30],
+            nice=False
+        ),
+        axis=alt.Axis(
+            title="금액 (백만원)",
+            values=[0, 5, 10, 15, 20, 25, 30]
+        )
+    )
+
+    bars = alt.Chart(df_expense).mark_bar(
+        size=55,
+        cornerRadiusTopLeft=5,
+        cornerRadiusTopRight=5
+    ).encode(
+        x=x_axis,
+        y=y_axis,
+        tooltip=[
+            "항목:N",
+            "금액(백만원):Q",
+            "비중(%):Q"
+        ]
+    )
+
+    labels = alt.Chart(df_expense).mark_text(
+        dy=-12,
+        fontSize=13,
+        fontWeight="bold"
+    ).encode(
+        x=x_axis,
+        y=y_axis,
+        text="표시금액:N"
+    )
+
+    chart = (bars + labels).properties(
+        height=400
+    )
+
+    st.altair_chart(
+        chart,
+        width="stretch"
+    )
 
 # ── 사이드바 아래쪽: 회의록 상태 · 저장된 대화 ──
 with st.sidebar:
-    status = "✅" if st.session_state.meeting_text else "⬜"
-    st.subheader(f"📋 히스토리 관리 {status}")   # ✅: 회의록 준비됨 / ⬜: 회의록 없음
-    # 저장된 대화 수 (st.metric보다 한 단계 작은 글자)
+    status = "✅" if current_meeting else "⬜"
+
+    st.subheader(f"📋 히스토리 관리 {status}")
+
+    active_history = st.session_state.messages_dict.get(
+        st.session_state.active_doc, []
+    )
+
     st.markdown(
         f"<p style='font-size:0.875rem; margin:0;'>저장된 대화</p>"
-        f"<p style='font-size:1.75rem; margin:0;'>{len(st.session_state.messages) // 2}건</p>",
+        f"<p style='font-size:1.75rem; margin:0;'>"
+        f"{len(active_history) // 2}건</p>",
         unsafe_allow_html=True
     )
 
@@ -1103,6 +1365,137 @@ from difflib import SequenceMatcher
 # 오늘 날짜는 한국 시간 기준 (Streamlit Cloud 서버는 UTC라 date.today()를 쓰면 오전 9시 전엔 하루 전 날짜가 됨)
 def kst_today():
     return datetime.now(ZoneInfo("Asia/Seoul")).date()
+
+
+# [최초 설정: 팀 실습용 서비스 계정 연결]
+# 1) Colab 설치 셀: !pip install -q google-api-python-client google-auth
+# 2) Google Cloud 프로젝트에서 Google Calendar API 사용 설정.
+# 3) 서비스 계정 생성 후 JSON 키를 받아 Colab에 service_account.json으로 업로드.
+#    키 파일은 팀 공유 코드/Git에 넣지 않습니다.
+# 4) Google 캘린더 설정에서 사용할 캘린더를 서비스 계정의 client_email에
+#    '일정 변경' 권한으로 공유. 캘린더 통합 메뉴의 '캘린더 ID' 복사.
+# 5) Streamlit 실행 전에 Colab에서 아래 환경변수 설정:
+#    import os
+#    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = '/content/service_account.json'
+#    os.environ['GOOGLE_CALENDAR_ID'] = '복사한 캘린더 ID'
+# 6) 기존 기본 app.py 셀 → 이 캘린더 셀 → 팔로업 → 브리핑 순서로 한 번씩 실행.
+# Streamlit Cloud: secrets의 gcal_service_account 표에 JSON 키 필드,
+# GOOGLE_CALENDAR_ID에 캘린더 ID 설정도 지원합니다.
+# 공유한 캘린더에 이 앱 사용자가 쓸 수 있으므로 팀 실습용 비공개 앱에서 사용하세요.
+# 일반 사용자별 Google 로그인은 별도의 OAuth 웹 인증 구성이 필요합니다.
+import os
+import json
+import re
+
+
+def kst_now_str():
+    return datetime.now(ZoneInfo('Asia/Seoul')).isoformat(timespec='seconds')
+
+
+def able_google_client():
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+    calendar_id = os.getenv('GOOGLE_CALENDAR_ID', '')
+    key_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS', '')
+    scopes = ['https://www.googleapis.com/auth/calendar.events']
+    if key_path:
+        creds = service_account.Credentials.from_service_account_file(key_path, scopes=scopes)
+    else:
+        try:
+            info = dict(st.secrets['gcal_service_account'])
+        except Exception:
+            raise ValueError('Google 연결 설정이 없습니다. 제공한 코드 상단의 최초 설정을 완료해 주세요.') from None
+        creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+    if not calendar_id:
+        try:
+            calendar_id = st.secrets['GOOGLE_CALENDAR_ID']
+        except Exception:
+            raise ValueError('GOOGLE_CALENDAR_ID를 설정해 주세요.') from None
+    if calendar_id == 'primary':
+        raise ValueError('서비스 계정에는 공유한 캘린더의 실제 ID를 입력해 주세요.')
+    return build('calendar', 'v3', credentials=creds, cache_discovery=False), calendar_id
+
+
+def able_event_payload(task):
+    due = task['due']
+    description = '\n'.join([
+        task.get('detail', ''),
+        '종류: ' + task.get('kind', ''),
+        '상태: ' + ('완료' if task.get('done') else '미완료'),
+        '원문 기한: ' + (task.get('expr') or '기록에 없음'),
+        '출처: ' + str(task.get('source', '')),
+    ])
+    return {
+        'summary': ('[완료] ' if task.get('done') else '') + task['name'],
+        'description': description,
+        'start': {'date': due.isoformat()},
+        'end': {'date': (due + timedelta(days=1)).isoformat()},
+        'extendedProperties': {'private': {'able_task_id': task['task_id']}},
+    }
+
+
+def able_sync_google(tasks, service, calendar_id):
+    """한 버튼으로 일괄 처리. 성공한 업무는 유지하고 실패 항목은 별도로 보고."""
+    report = []
+    for task in tasks:
+        if task.get('due') is None or not task.get('use'):
+            continue
+        # 동일 task_id 재시도는 새 이벤트를 만들지 않고 기존 이벤트를 갱신.
+        event_id = 'able' + hashlib.sha256(task['task_id'].encode()).hexdigest()
+        body = able_event_payload(task)
+        try:
+            try:
+                result = service.events().get(calendarId=calendar_id, eventId=event_id).execute()
+            except Exception as exc:
+                if getattr(getattr(exc, 'resp', None), 'status', None) != 404:
+                    raise
+                try:
+                    result = service.events().insert(calendarId=calendar_id,
+                        body={**body, 'id': event_id}, sendUpdates='none').execute()
+                    action = '등록'
+                except Exception as conflict:
+                    if getattr(getattr(conflict, 'resp', None), 'status', None) != 409:
+                        raise
+                    result = service.events().patch(calendarId=calendar_id, eventId=event_id,
+                        body=body, sendUpdates='none').execute()
+                    action = '수정'
+            else:
+                if result.get('status') == 'cancelled':
+                    raise ValueError('Google에서 삭제한 일정입니다. 새 업무로 등록해 주세요.')
+                result = service.events().patch(calendarId=calendar_id, eventId=event_id,
+                    body=body, sendUpdates='none').execute()
+                action = '수정'
+            task['google_event_id'] = result['id']
+            task['google_synced_at'] = kst_now_str()
+            report.append({'업무': task['name'], '결과': action + ' 완료', '오류': ''})
+        except Exception as exc:
+            code = getattr(getattr(exc, 'resp', None), 'status', None)
+            reason = {401:'인증 만료 또는 인증 오류',403:'Calendar API 사용 설정·공유 권한을 확인하세요',
+                      404:'캘린더 ID 또는 공유 설정을 확인하세요',429:'요청 제한: 잠시 후 다시 시도하세요'}.get(code)
+            report.append({'업무':task['name'],'결과':'실패',
+                           '오류':reason or (str(exc) if isinstance(exc, ValueError) else '연결 오류: 다시 시도해 주세요')})
+    return report
+
+
+def able_run_sync():
+    candidates = [t for t in st.session_state.schedule if t.get('due') is not None and t.get('use')]
+    if not candidates:
+        st.warning('날짜를 정하고 달력 표시를 켠 업무가 없습니다.')
+        return
+    try:
+        service, calendar_id = able_google_client()
+        try:
+            with st.spinner(f'{len(candidates)}개 업무를 Google 캘린더에 저장하고 있습니다…'):
+                report = able_sync_google(candidates, service, calendar_id)
+        finally:
+            service.close()
+        st.session_state.able_google_report = report
+    except ImportError:
+        st.session_state.able_google_report = [{'업무':'연결','결과':'실패','오류':'google-api-python-client와 google-auth를 설치해 주세요.'}]
+    except Exception as exc:
+        st.session_state.able_google_report = [{'업무':'연결','결과':'실패',
+            '오류':str(exc) if isinstance(exc, ValueError) else 'Google 연결 설정을 확인해 주세요.'}]
+
 
 # ── ① 일정 추출용 출력 스키마 (05 실습 JSON 구조화) ──
 schedule_schema = {
@@ -1772,26 +2165,43 @@ if page == PAGES[2]:
     if not schedule:
         st.info("회의록을 업로드한 뒤 '회의록에서 일정 추출'을 눌러 주세요.")
     else:
-        # ② 일정 확인 및 수정 (고친 값은 일정 목록에 바로 저장 → 메뉴를 옮겨도 유지)
-        with st.expander("✏️ 일정 확인 및 수정 (날짜 정하기 · 완료 표시)"):
-            st.caption("기한이 없거나 애매한 일정은 날짜를 정한 뒤 '달력 표시'를 체크하세요.")
-            for i, it in enumerate(schedule):
-                a, b, c, d = st.columns([1, 3, 2, 1], vertical_alignment="center")
-                it["use"] = a.checkbox("달력 표시", value=it["use"], key=f"use_{ver}_{i}")
-                b.markdown(f"**{it['name']}** ({it['kind']})  \n<small>출처: {it.get('source', '알 수 없음')}</small>", unsafe_allow_html=True)
-                # 기한 미정 업무는 회의일 또는 오늘을 입력창의 초기값으로 제안
-                # 제안값은 확정 마감일이 아니며 사용자가 직접 확인해야 함
-                initial_due = it["due"] or it.get("meeting_date") or kst_today()
-
-                it["due"] = c.date_input(
-                    "마감일",
-                    value=initial_due,
-                    key=f"due_{ver}_{i}"
-                )
-                it["done"] = d.checkbox("완료", value=it["done"], key=f"done_{ver}_{i}")
+        # 모든 업무는 기한 유무와 무관하게 여기에서 편집합니다.
+        for task in schedule:
+            task.setdefault("task_id", create_task_id())
+        with st.expander("✏️ 전체 업무 수정 · 날짜 미정 업무에 날짜 지정", expanded=True):
+            st.caption("마감일은 빈칸에서도 선택할 수 있습니다. 수정 후 아래 저장 버튼을 누르세요.")
+            with st.form(f"able_schedule_editor_{ver}"):
+                edits = []
+                for it in schedule:
+                    ident = f"able_edit_{ver}_{it['task_id']}"
+                    st.markdown(f"**{it['name']}**")
+                    st.caption(f"원문 기한: {it.get('expr') or '기록에 없음'}")
+                    name = st.text_input("업무명", value=it['name'], key=ident+'_name')
+                    detail = st.text_area("일정 내용", value=it.get('detail', ''), key=ident+'_detail', height=80)
+                    c1, c2, c3 = st.columns([2, 1, 1])
+                    due = c1.date_input("마감일 (날짜 미정이면 비워두세요)", value=it.get('due'), key=ident+'_due')
+                    # 날짜가 없었던 업무는 날짜 지정 후 바로 달력에 표시되도록 기본 체크.
+                    use = c2.checkbox("달력 표시", value=it.get('use', False) or it.get('due') is None, key=ident+'_use')
+                    done = c3.checkbox("완료", value=it.get('done', False), key=ident+'_done')
+                    edits.append((it, name.strip(), detail, due, use, done))
+                    st.divider()
+                local_save = st.form_submit_button("수정 내용 저장")
+                google_save = st.form_submit_button("수정 저장 + Google 캘린더 전체 등록·수정", type="primary")
+                if local_save or google_save:
+                    if any(not name for _, name, _, _, _, _ in edits):
+                        st.error("업무명을 비워둘 수 없습니다.")
+                    else:
+                        for it, name, detail, due, use, done in edits:
+                            if due != it.get('due'):
+                                update_task_history(it, due, kst_today(), "Streamlit에서 직접 수정")
+                            it.update(name=name, detail=detail, due=due, use=bool(use and due is not None), done=done)
+                        if google_save:
+                            able_run_sync()
+                        st.session_state.sched_ver += 1
+                        st.rerun()
 
         today = kst_today()
-        active = [it for it in schedule if it["use"]]
+        active = [it for it in schedule if it["use"] and it.get("due") is not None]
 
         # 날짜별 마감 업무 / 마일스톤 모으기
         due_map, ms_map, rows = {}, {}, []
@@ -1874,7 +2284,7 @@ if page == PAGES[2]:
             st.caption("완료 여부는 위의 '일정 확인 및 수정'에서 변경할 수 있습니다.")
 
         # ⑥ 기한 미정 업무
-        undecided = [it for it in schedule if not it["use"]]
+        undecided = [it for it in schedule if it.get("due") is None]
         with st.expander(f"⚪ 기한 미정 업무 {len(undecided)}건"):
             if not undecided:
                 st.write("기한 미정 업무가 없습니다.")
@@ -1891,367 +2301,26 @@ if page == PAGES[2]:
                                file_name="able_schedule.ics", mime="text/calendar",
                                type="primary", use_container_width=True)
             st.caption(f"마일스톤 {len(rows)}개(D-14, D-7, D-1, D-day)가 담깁니다. "
-                       "파일을 열면 Google·Outlook·휴대폰 캘린더에 바로 등록됩니다.")
+                       "파일 가져오기 방식입니다. 직접 일괄 저장은 아래 Google 연동을 사용하세요.")
     # ============================================================
-    # [최초 설정: 팀 실습용 서비스 계정 연결]
-    # 1) Colab 설치 셀: !pip install -q google-api-python-client google-auth
-    # 2) Google Cloud 프로젝트에서 Google Calendar API 사용 설정.
-    # 3) 서비스 계정 생성 후 JSON 키를 받아 Colab에 service_account.json으로 업로드.
-    #    키 파일은 팀 공유 코드/Git에 넣지 않습니다.
-    # 4) Google 캘린더 설정에서 사용할 캘린더를 서비스 계정의 client_email에
-    #    '일정 변경' 권한으로 공유. 캘린더 통합 메뉴의 '캘린더 ID' 복사.
-    # 5) Streamlit 실행 전에 Colab에서 아래 환경변수 설정:
-    #    import os
-    #    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = '/content/service_account.json'
-    #    os.environ['GOOGLE_CALENDAR_ID'] = '복사한 캘린더 ID'
-    # 6) 기존 기본 app.py 셀 → 이 캘린더 셀 → 팔로업 → 브리핑 순서로 한 번씩 실행.
-    # Streamlit Cloud: secrets의 gcal_service_account 표에 JSON 키 필드,
-    # GOOGLE_CALENDAR_ID에 캘린더 ID 설정도 지원합니다.
-    # 공유한 캘린더에 이 앱 사용자가 쓸 수 있으므로 팀 실습용 비공개 앱에서 사용하세요.
-    # 일반 사용자별 Google 로그인은 별도의 OAuth 웹 인증 구성이 필요합니다.
-    import os
-    import json
-    import re
-
-
-    def able_google_now_str():
-        return datetime.now(ZoneInfo('Asia/Seoul')).isoformat(timespec='seconds')
-
-
-    def able_google_client():
-        from google.oauth2 import service_account
-        from googleapiclient.discovery import build
-        calendar_id = os.getenv('GOOGLE_CALENDAR_ID', '')
-        key_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS', '')
-        scopes = ['https://www.googleapis.com/auth/calendar.events']
-        if key_path:
-            creds = service_account.Credentials.from_service_account_file(key_path, scopes=scopes)
-        else:
-            try:
-                info = dict(st.secrets['gcal_service_account'])
-            except Exception:
-                raise ValueError('Google 연결 설정이 없습니다. 제공한 코드 상단의 최초 설정을 완료해 주세요.') from None
-            creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
-        if not calendar_id:
-            try:
-                calendar_id = st.secrets['GOOGLE_CALENDAR_ID']
-            except Exception:
-                raise ValueError('GOOGLE_CALENDAR_ID를 설정해 주세요.') from None
-        if calendar_id == 'primary':
-            raise ValueError('서비스 계정에는 공유한 캘린더의 실제 ID를 입력해 주세요.')
-        return build('calendar', 'v3', credentials=creds, cache_discovery=False), calendar_id
-
-
-    def able_event_payload(task):
-        due = task['due']
-        if isinstance(due, str):
-            due = date.fromisoformat(due[:10])
-        description = '\n'.join([
-            task.get('detail', ''),
-            '종류: ' + task.get('kind', ''),
-            '상태: ' + ('완료' if task.get('done') else '미완료'),
-            '원문 기한: ' + (task.get('expr') or '기록에 없음'),
-            '출처: ' + str(task.get('source', '')),
-            '회의일: ' + str(task.get('meeting_date', '')),
-        ])
-        return {
-            'summary': ('[완료] ' if task.get('done') else '') + task['name'],
-            'description': description,
-            'start': {'date': due.isoformat()},
-            'end': {'date': (due + timedelta(days=1)).isoformat()},
-            'extendedProperties': {'private': {'able_task_id': task['task_id']}},
-        }
-
-
-    def able_sync_google(tasks, service, calendar_id):
-        """한 버튼으로 일괄 처리. 성공한 업무는 유지하고 실패 항목은 별도로 보고."""
-        report = []
-        for task in tasks:
-            if task.get('due') is None or not task.get('use'):
-                continue
-            # 동일 task_id 재시도는 새 이벤트를 만들지 않고 기존 이벤트를 갱신.
-            event_id = 'able' + hashlib.sha256(task['task_id'].encode()).hexdigest()
-            body = able_event_payload(task)
-            try:
-                try:
-                    result = service.events().get(calendarId=calendar_id, eventId=event_id).execute()
-                except Exception as exc:
-                    if getattr(getattr(exc, 'resp', None), 'status', None) != 404:
-                        raise
-                    try:
-                        result = service.events().insert(calendarId=calendar_id,
-                            body={**body, 'id': event_id}, sendUpdates='none').execute()
-                        action = '등록'
-                    except Exception as conflict:
-                        if getattr(getattr(conflict, 'resp', None), 'status', None) != 409:
-                            raise
-                        result = service.events().patch(calendarId=calendar_id, eventId=event_id,
-                            body=body, sendUpdates='none').execute()
-                        action = '수정'
-                else:
-                    if result.get('status') == 'cancelled':
-                        raise ValueError('Google에서 삭제한 일정입니다. 새 업무로 등록해 주세요.')
-                    result = service.events().patch(calendarId=calendar_id, eventId=event_id,
-                        body=body, sendUpdates='none').execute()
-                    action = '수정'
-                task['google_event_id'] = result['id']
-                task['google_synced_at'] = able_google_now_str()
-                report.append({'업무': task['name'], '결과': action + ' 완료', '오류': ''})
-            except Exception as exc:
-                code = getattr(getattr(exc, 'resp', None), 'status', None)
-                reason = {401:'인증 만료 또는 인증 오류',403:'Calendar API 사용 설정·공유 권한을 확인하세요',
-                          404:'캘린더 ID 또는 공유 설정을 확인하세요',429:'요청 제한: 잠시 후 다시 시도하세요'}.get(code)
-                report.append({'업무':task['name'],'결과':'실패',
-                               '오류':reason or (str(exc) if isinstance(exc, ValueError) else '연결 오류: 다시 시도해 주세요')})
-        return report
-
-
-    def able_run_sync():
-        for task in st.session_state.schedule:
-            if not task.get('task_id'):
-                task['task_id'] = str(uuid.uuid4())
-        candidates = [t for t in st.session_state.schedule if t.get('due') is not None and t.get('use')]
-        if not candidates:
-            st.warning('날짜를 정하고 달력 표시를 켠 업무가 없습니다.')
-            return
-        try:
-            service, calendar_id = able_google_client()
-            try:
-                with st.spinner(f'{len(candidates)}개 업무를 Google 캘린더에 저장하고 있습니다…'):
-                    report = able_sync_google(candidates, service, calendar_id)
-            finally:
-                service.close()
-            st.session_state.able_google_report = report
-        except ImportError:
-            st.session_state.able_google_report = [{'업무':'연결','결과':'실패','오류':'google-api-python-client와 google-auth를 설치해 주세요.'}]
-        except Exception as exc:
-            st.session_state.able_google_report = [{'업무':'연결','결과':'실패',
-                '오류':str(exc) if isinstance(exc, ValueError) else 'Google 연결 설정을 확인해 주세요.'}]
-
-
-
-
-    # Outlook 최초 설정 (Microsoft Entra 관리 센터)
-    # 앱 등록 → 새 등록 → 조직 계정 및 개인 Microsoft 계정 지원 선택.
-    # 인증 → 고급 설정 → 퍼블릭 클라이언트 흐름 허용: 예.
-    # API 권한 → Microsoft Graph → 위임 권한 → Calendars.ReadWrite, User.Read.
-    # Colab에서 Streamlit 실행 전에:
-    # os.environ['MICROSOFT_CLIENT_ID'] = '앱의 애플리케이션(클라이언트) ID'
-    # 클라이언트 비밀은 사용하지 않습니다. 조직 정책에 따라 관리자 동의가 필요할 수 있습니다.
-    # 설치: !pip install -q google-api-python-client google-auth requests
-    import time
-    import requests
-    from urllib.parse import quote
-
-    OUTLOOK_SCOPES = 'https://graph.microsoft.com/Calendars.ReadWrite https://graph.microsoft.com/User.Read offline_access'
-    OUTLOOK_TOKEN_URL = 'https://login.microsoftonline.com/common/oauth2/v2.0/token'
-    OUTLOOK_PROP = 'String {c113a684-a529-4c11-92dd-291af61589dc} Name AivleTaskId'
-
-    def able_ms_client_id():
-        value = os.getenv('MICROSOFT_CLIENT_ID', '')
-        if not value:
-            try:
-                value = st.secrets['MICROSOFT_CLIENT_ID']
-            except Exception:
-                pass
-        if not value:
-            raise ValueError('MICROSOFT_CLIENT_ID가 없습니다. 코드의 Outlook 최초 설정을 완료해 주세요.')
-        return value
-
-    def able_graph(method, path, token, **kwargs):
-        response = requests.request(method, 'https://graph.microsoft.com/v1.0' + path,
-            headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
-            timeout=30, **kwargs)
-        if not response.ok:
-            reason = {401:'Outlook에 다시 연결해 주세요.', 403:'캘린더 쓰기 권한 또는 조직 정책을 확인하세요.',
-                      429:'요청이 많습니다. 잠시 후 다시 시도하세요.'}.get(response.status_code, f'Outlook 요청 실패 (HTTP {response.status_code})')
-            raise ValueError(reason)
-        return response.json() if response.content else {}
-
-    def able_store_ms_tokens(data):
-        old = st.session_state.get('able_ms_tokens', {})
-        st.session_state.able_ms_tokens = {
-            'access_token': data['access_token'],
-            'refresh_token': data.get('refresh_token', old.get('refresh_token')),
-            'expires_at': time.time() + int(data.get('expires_in', 3600)),
-            'client_id': able_ms_client_id(),
-        }
-
-    def able_ms_token():
-        data = st.session_state.get('able_ms_tokens')
-        if not data or data.get('client_id') != able_ms_client_id():
-            raise ValueError('먼저 Outlook 계정을 연결해 주세요.')
-        if data['expires_at'] > time.time() + 90:
-            return data['access_token']
-        response = requests.post(OUTLOOK_TOKEN_URL, data={
-            'client_id': able_ms_client_id(), 'grant_type':'refresh_token',
-            'refresh_token':data.get('refresh_token'), 'scope':OUTLOOK_SCOPES}, timeout=30)
-        if not response.ok:
-            st.session_state.pop('able_ms_tokens', None)
-            raise ValueError('Outlook 연결이 만료되었습니다. 다시 연결해 주세요.')
-        able_store_ms_tokens(response.json())
-        return st.session_state.able_ms_tokens['access_token']
-
-    def able_begin_ms_login():
-        response = requests.post('https://login.microsoftonline.com/common/oauth2/v2.0/devicecode',
-            data={'client_id':able_ms_client_id(), 'scope':OUTLOOK_SCOPES}, timeout=30)
-        if not response.ok:
-            raise ValueError('로그인 시작 실패: 앱 ID와 퍼블릭 클라이언트 설정을 확인하세요.')
-        flow = response.json()
-        flow['expires_at'] = time.time() + flow['expires_in']
-        flow['next_poll'] = time.time() + flow.get('interval', 5)
-        flow['client_id'] = able_ms_client_id()
-        st.session_state.able_ms_flow = flow
-
-    def able_check_ms_login():
-        flow = st.session_state.get('able_ms_flow')
-        if not flow or time.time() >= flow['expires_at']:
-            st.session_state.pop('able_ms_flow', None)
-            raise ValueError('인증 코드가 만료되었습니다. 연결 시작을 다시 눌러주세요.')
-        if flow['client_id'] != able_ms_client_id():
-            raise ValueError('앱 설정이 변경되었습니다. 연결을 다시 시작해 주세요.')
-        if time.time() < flow['next_poll']:
-            return '잠시 후 로그인 완료 확인을 다시 눌러주세요.'
-        flow['next_poll'] = time.time() + flow.get('interval', 5)
-        response = requests.post(OUTLOOK_TOKEN_URL, data={
-            'client_id':flow['client_id'], 'grant_type':'urn:ietf:params:oauth:grant-type:device_code',
-            'device_code':flow['device_code']}, timeout=30)
-        data = response.json()
-        if response.ok and 'access_token' in data:
-            # 로그인은 연결만 수행하며 일정 등록 버튼을 대신 실행하지 않습니다.
-            account = able_graph('GET', '/me', data['access_token'], params={'$select':'id,displayName,mail,userPrincipalName'})
-            able_store_ms_tokens(data)
-            st.session_state.able_ms_account = account
-            st.session_state.pop('able_ms_flow', None)
-            st.session_state.pop('able_outlook_report', None)
-            return '연결되었습니다. 아래 등록 버튼으로 일정을 저장하세요.'
-        error = data.get('error')
-        if error == 'authorization_pending':
-            return 'Microsoft 로그인과 권한 동의를 완료한 뒤 다시 눌러주세요.'
-        if error == 'slow_down':
-            flow['interval'] = flow.get('interval', 5) + 5
-            flow['next_poll'] = time.time() + flow['interval']
-            return '인증 확인이 너무 빠릅니다. 잠시 후 다시 눌러주세요.'
-        st.session_state.pop('able_ms_flow', None)
-        raise ValueError('인증이 거부되었거나 만료되었습니다. 연결을 다시 시작해 주세요.')
-
-    def able_outlook_body(task):
-        google = able_event_payload(task)
-        return {
-            'subject': google['summary'],
-            'body': {'contentType':'text', 'content':google['description']},
-            'isAllDay': True,
-            'start': {'dateTime':google['start']['date']+'T00:00:00', 'timeZone':'Korea Standard Time'},
-            'end': {'dateTime':google['end']['date']+'T00:00:00', 'timeZone':'Korea Standard Time'},
-        }
-
-    def able_sync_outlook(tasks, token):
-        report = []
-        for task in tasks:
-            try:
-                identity = hashlib.sha256(task['task_id'].encode()).hexdigest()
-                body = able_outlook_body(task)
-                # ID 표식을 조회하므로 같은 계정에서 재연결해도 기존 일정에 수정합니다.
-                found = able_graph('GET', '/me/calendar/events', token, params={
-                    '$filter':f"singleValueExtendedProperties/Any(ep: ep/id eq '{OUTLOOK_PROP}' and ep/value eq '{identity}')",
-                    '$select':'id', '$top':2}).get('value', [])
-                if len(found) > 1:
-                    raise ValueError('같은 업무 표식의 일정이 여러 개입니다. Outlook에서 중복을 확인해 주세요.')
-                if found:
-                    able_graph('PATCH', '/me/events/'+quote(found[0]['id'], safe=''), token, json=body)
-                    action = '수정 완료'
-                else:
-                    body['transactionId'] = identity
-                    body['singleValueExtendedProperties'] = [{'id':OUTLOOK_PROP, 'value':identity}]
-                    able_graph('POST', '/me/calendar/events', token, json=body)
-                    action = '등록 완료'
-                report.append({'업무':task['name'], '결과':action, '오류':''})
-            except Exception as exc:
-                report.append({'업무':task['name'], '결과':'실패', '오류':str(exc) if isinstance(exc, ValueError) else '연결 오류: 다시 시도해 주세요.'})
-        return report
-
-    def able_calendar_export_tasks(include_checkpoints):
-        outgoing = []
-        for task in st.session_state.schedule:
-            if not task.get('use') or task.get('due') is None:
-                continue
-            if not task.get('task_id'):
-                task['task_id'] = str(uuid.uuid4())
-            item = dict(task)
-            if isinstance(item['due'], str):
-                item['due'] = date.fromisoformat(item['due'][:10])
-            outgoing.append(item)
-            if include_checkpoints:
-                for row in make_milestones(item['name'], item['due'], base_day):
-                    if row['단계'] == 'D-day':
-                        continue
-                    outgoing.append({**item, 'task_id':item['task_id']+'-'+row['단계'],
-                                     'name':row['제목'], 'due':row['날짜']})
-        return outgoing
-
-    def able_render_report(provider, report):
-        failed = sum(r['결과'] == '실패' for r in report)
-        text = f"{provider} 최근 결과: 성공 {len(report)-failed}건 / 실패 {failed}건"
-        st.warning(text) if failed else st.success(text)
-        st.dataframe(report, hide_index=True)
-
+    # Google Calendar API로 직접 일괄 등록·수정
     st.divider()
-    st.subheader('🔗 외부 캘린더에 전체 등록')
-    st.caption('연결 후에는 외부 캘린더의 일정 작성 화면을 열지 않고, 여기서 수정한 내용을 한 번에 저장합니다.')
-    with st.expander('Outlook 계정 연결', expanded=not st.session_state.get('able_ms_tokens')):
-        account = st.session_state.get('able_ms_account')
-        if st.session_state.get('able_ms_tokens') and account:
-            st.success('연결 계정: '+(account.get('mail') or account.get('userPrincipalName') or account.get('displayName','')))
-            if st.button('Outlook 연결 해제', key='able_ms_disconnect'):
-                for key in ('able_ms_tokens','able_ms_flow','able_ms_account','able_outlook_report'):
-                    st.session_state.pop(key, None)
-                st.rerun()
+    st.subheader("🔗 Google 캘린더 일괄 저장")
+    target = [t for t in st.session_state.schedule if t.get('due') is not None and t.get('use')]
+    st.caption(f"저장 대상: {len(target)}건 · 날짜가 있고 달력 표시가 켜진 업무 (완료 업무 포함)")
+    st.caption("편집 중인 내용까지 보내려면 위의 ‘수정 저장 + Google 캘린더 전체 등록·수정’을 누르세요. 같은 업무를 다시 저장하면 Google의 기존 일정을 갱신합니다.")
+    st.caption("날짜 미정·표시 해제 업무는 전송하지 않습니다. 이미 Google에 등록한 일정을 자동 삭제하지는 않습니다. 사전 점검 일정은 이 버튼의 전송 대상이 아닙니다.")
+    if st.button("저장된 업무 전체를 Google 캘린더에 등록·수정", key="able_google_all", disabled=not target):
+        able_run_sync()
+    report = st.session_state.get('able_google_report')
+    if report:
+        failed = sum(r['결과'] == '실패' for r in report)
+        if failed:
+            st.warning(f"최근 전송 결과: 성공 {len(report)-failed}건 / 실패 {failed}건. 실패 원인을 확인한 뒤 다시 저장하세요.")
         else:
-            if st.button('Outlook 연결 시작', key='able_ms_connect'):
-                try:
-                    able_begin_ms_login()
-                except Exception as exc:
-                    st.error(str(exc) if isinstance(exc, ValueError) else '로그인 서버 연결 실패')
-            flow = st.session_state.get('able_ms_flow')
-            if flow:
-                st.write('Microsoft 로그인 화면에 아래 코드를 입력하고 캘린더 권한을 허용하세요.')
-                st.code(flow['user_code'], language=None)
-                st.link_button('Microsoft 로그인 열기', 'https://microsoft.com/devicelogin')
-                if st.button('로그인 완료 확인', key='able_ms_check'):
-                    try:
-                        message = able_check_ms_login()
-                        if st.session_state.get('able_ms_tokens'):
-                            st.rerun()
-                        st.info(message)
-                    except Exception as exc:
-                        st.error(str(exc) if isinstance(exc, ValueError) else '로그인 확인 실패')
-    include_checkpoints = st.checkbox('달력의 사전 점검 일정(D-14·D-7·D-1)도 함께 등록', value=True, key='able_export_checkpoints')
-    export_tasks = able_calendar_export_tasks(include_checkpoints)
-    st.caption(f'전송 대상 {len(export_tasks)}건 · 달력 표시가 켜진 업무의 마감일과 선택한 점검 일정 · 완료 업무 포함')
-    st.caption('Google은 설정한 캘린더, Outlook은 연결 계정의 기본 캘린더에 저장합니다. 각 버튼은 해당 서비스에만 저장합니다.')
-    cg, co = st.columns(2)
-    if cg.button('🔵 Google Calendar에 등록', key='external_google_bulk', type='primary', disabled=not export_tasks, use_container_width=True):
-        try:
-            service, calendar_id = able_google_client()
-            try:
-                with st.spinner('전체 일정을 Google에 등록·수정하고 있습니다…'):
-                    st.session_state.able_google_report = able_sync_google(export_tasks, service, calendar_id)
-            finally:
-                service.close()
-        except Exception as exc:
-            st.session_state.able_google_report = [{'업무':'연결','결과':'실패','오류':str(exc) if isinstance(exc, ValueError) else 'Google 설치·인증 설정을 확인해 주세요.'}]
-    if co.button('🟣 Outlook Calendar에 등록', key='external_outlook_bulk', type='primary', disabled=not export_tasks or not st.session_state.get('able_ms_tokens'), use_container_width=True):
-        try:
-            token = able_ms_token()
-            with st.spinner('전체 일정을 Outlook에 등록·수정하고 있습니다…'):
-                st.session_state.able_outlook_report = able_sync_outlook(export_tasks, token)
-        except Exception as exc:
-            st.session_state.able_outlook_report = [{'업무':'연결','결과':'실패','오류':str(exc) if isinstance(exc, ValueError) else 'Outlook 연결을 확인해 주세요.'}]
-    for provider, key in [('Google','able_google_report'),('Outlook','able_outlook_report')]:
-        if st.session_state.get(key):
-            able_render_report(provider, st.session_state[key])
-    st.caption('기한 미정·표시 해제 일정은 전송하지 않습니다. 기존 외부 일정은 자동 삭제하지 않으며, 날짜 변경으로 달력에서 제외된 과거 점검 일정도 남을 수 있습니다.')
-    st.caption('같은 업무 ID를 유지하는 동안 기존 일정을 수정합니다. Streamlit 세션 초기화 후 일정을 다시 추출하면 업무 ID가 바뀌어 중복될 수 있습니다.')
+            st.success(f"최근 전송 결과: {len(report)}건을 Google 캘린더에 저장했습니다.")
+        st.dataframe(report, hide_index=True)
+    st.caption("계정 연결 전에는 코드 상단의 최초 설정을 완료해 주세요. Streamlit 세션이 초기화되면 업무 ID도 사라질 수 있으므로 업무 데이터의 영구 저장은 별도로 필요합니다.")
 
 # ══════════════════════════════════════════════════════════════
 # 메뉴 4: 팔로업 메일 초안 자동 생성 & 원클릭 승인
@@ -2554,222 +2623,136 @@ if page == PAGES[4]:
             st.write(b["script"])
 
 # ══════════════════════════════════════════════════════════════
-# 메뉴 6: 🍃 오늘의 할 일 (김 대리 업무 체크리스트)
+# 메뉴 6: 🍃 오늘의 할 일 (Kanban 보드: TO DO → DOING → DONE)
 #  - ⚠️ 출근길 브리핑 셀 다음에, 이 셀을 한 번만 실행하세요.
 #  - 업무 목록은 '📅 마감 캘린더'에서 추출한 일정(st.session_state.schedule)을 그대로 사용
-#  - 여기서 완료를 체크하면 캘린더의 완료 표시(✅)에도 바로 반영됨
+#  - 진행 상태(status)는 업무마다 저장: 처음 추출하면 모두 TO DO (회의에서 막 배정된 업무라 시작 전)
+#  - DONE으로 옮기면 캘린더의 완료(✅)에도 바로 반영되고, 캘린더에서 완료를 체크해도 DONE에 표시됨
+#  - ⚠️ 아래 '회의 자료실' 셀이 elif로 이어지므로, 이 셀의 마지막 문장은 반드시 if page == PAGES[5]: 블록이어야 함
 # ══════════════════════════════════════════════════════════════
 
-def today_group(item, today):
-    """업무를 마감 상황별로 묶기"""
-    if not item.get("use") or not item.get("due"):
-        return "🗓️ 기한 확인 필요"
-    if item["due"] < today:
-        return "⚠️ 기한 경과"
-    if item["due"] == today:
-        return "🔥 오늘 마감"
-    return "📋 앞으로 할 일"
+KANBAN_COLUMNS = [
+    # (상태 값, 제목, 설명, 제목 배경색, 카드 배경색)
+    ("todo",  "TO DO", "시작 전 · 해야 할 업무",      "#0E6E6E", "#FFF3D0"),
+    ("doing", "DOING", "진행 중 · 확인이 필요한 업무", "#0F8B8D", "#DCEFEA"),
+    ("done",  "DONE",  "완료 · 검토 완료",            "#0E6E6E", "#ECEFEE"),
+]
+DOING_LIMIT = 2   # 작성 TIP '02 Doing 최소로 유지': 진행 중 업무가 이보다 많으면 안내
 
-def save_today_done(index, key):
-    """체크박스를 바꾸면 일정 목록의 완료 여부를 저장"""
-    st.session_state.schedule[index]["done"] = st.session_state[key]
-    st.session_state.sched_ver += 1    # 캘린더의 완료 체크칸도 새 값으로 다시 그리기
+def kanban_status(item):
+    """업무의 보드 위치: 완료(done)가 최우선, 아니면 저장된 상태(없으면 todo)"""
+    if item.get("done"):
+        return "done"
+    status = item.get("status", "todo")
+    return "todo" if status == "done" else status   # 캘린더에서 완료를 해제한 경우 대비
+
+def move_task(index, new_status):
+    """카드 이동 버튼: 상태 저장 + 완료 여부를 캘린더와 맞춤"""
+    task = st.session_state.schedule[index]
+    task["status"] = new_status
+    task["done"] = (new_status == "done")
+    st.session_state.sched_ver += 1       # 캘린더의 완료 체크칸도 새 값으로 다시 그리기
+
+def due_badge(item, today):
+    """카드에 표시할 마감 정보 (기한이 없으면 회의 표현이나 '기한 미정')"""
+    if item.get("use") and item.get("due"):
+        return f"📅 {item['due']:%m.%d} · {deadline_label(item['due'], today)}"
+    if item.get("expr"):
+        return f"⚪ 기한 미정 · 회의 표현: {item['expr']}"
+    return "⚪ 기한 미정"
 
 if page == PAGES[5]:
     st.subheader("🍃 오늘의 할 일")
-    today = kst_today()                 # 캘린더 셀의 한국 시간 기준 오늘
+    today = kst_today()                 # 한국 시간 기준 오늘
     st.caption(f"{today:%Y.%m.%d} · 김 대리님의 업무")
 
-    # 김 대리 업무만 골라내기 (번호 i는 일정 목록에서의 위치 → 완료 저장에 사용)
+    # 김 대리 업무만 골라내기 (번호 i는 일정 목록에서의 위치 → 이동 저장에 사용)
     tasks = [(i, it) for i, it in enumerate(st.session_state.schedule)
              if it["kind"] == "김 대리 업무"]
 
     if not tasks:
         st.info("'📅 마감 캘린더' 메뉴에서 먼저 일정을 추출해 주세요.")
     else:
-        pending = [(i, it) for i, it in tasks if not it["done"]]
-        done = [(i, it) for i, it in tasks if it["done"]]
+        # 기한 미정 업무는 따로 묶지 않고 카드에 표시 + 한 줄 안내만
+        undated = sum(1 for _, it in tasks if not (it.get("use") and it.get("due")))
+        if undated:
+            st.caption(f"⚪ 기한 미정 업무 {undated}건 · '📅 마감 캘린더'의 '일정 확인 및 수정'에서 날짜를 정할 수 있어요.")
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("남은 업무", f"{len(pending)}건")
-        c2.metric("오늘 마감", f"{sum(today_group(it, today) == '🔥 오늘 마감' for _, it in pending)}건")
-        c3.metric("완료", f"{len(done)}건")
+        doing_count = sum(1 for _, it in tasks if kanban_status(it) == "doing")
+        if doing_count > DOING_LIMIT:
+            st.warning(f"진행 중인 업무가 {doing_count}건이에요. 하나씩 마무리한 뒤 다음 업무를 시작하는 게 좋아요.")
 
         ver = st.session_state.sched_ver
-        for group in ["⚠️ 기한 경과", "🔥 오늘 마감", "📋 앞으로 할 일", "🗓️ 기한 확인 필요"]:
-            items = [(i, it) for i, it in pending if today_group(it, today) == group]
-            if not items:
-                continue
-            st.markdown(f"#### {group}")
-            items.sort(key=lambda pair: pair[1]["due"] if pair[1]["use"] else date.max)
+        cols = st.columns(3, gap="medium")
 
-            for i, it in items:
-                key = f"today_{ver}_{i}"
-                with st.container(border=True):
-                    st.checkbox(it["name"], value=False, key=key,
-                                on_change=save_today_done, args=(i, key))
-                    if it["use"]:
-                        # deadline_label: 캘린더 셀의 'D-3 / 오늘 마감 / 2일 경과' 함수 재사용
-                        st.caption(f"📅 마감일: {it['due']:%Y.%m.%d} · {deadline_label(it['due'], today)}")
-                        if it["expr"]:
-                            st.caption(f"회의록 표현: {it['expr']}")
-                    elif it["expr"]:
-                        st.caption(f"🗓️ 기한: {it['expr']} · 정확한 날짜 확인 필요 (캘린더에서 지정)")
-                    else:
-                        st.caption("🗓️ 기한 미정 · 캘린더의 '일정 확인 및 수정'에서 날짜를 정할 수 있어요")
+        for col, (status, title, desc, head_color, card_color) in zip(cols, KANBAN_COLUMNS):
+            # 이 열에 들어갈 업무 (마감이 빠른 순, 기한 미정은 맨 뒤)
+            items = [(i, it) for i, it in tasks if kanban_status(it) == status]
+            items.sort(key=lambda p: p[1]["due"] if p[1].get("use") and p[1].get("due") else date.max)
 
-        if not pending:
+            with col:
+                # 열 제목 (Kanban 보드 머리글)
+                st.markdown(
+                    f"<div style='background:{head_color}; color:white; border-radius:10px; "
+                    f"padding:10px 0; text-align:center;'>"
+                    f"<div style='font-size:1.3rem; font-weight:700;'>{title} ({len(items)})</div>"
+                    f"<div style='font-size:0.8rem; opacity:0.85;'>{desc}</div></div>",
+                    unsafe_allow_html=True
+                )
+
+                if not items:
+                    st.caption("업무 없음")
+
+                for i, it in items:
+                    with st.container(border=True):
+                        # 카드 내용 (업무명 + 마감 정보)
+                        st.markdown(
+                            f"<div style='background:{card_color}; border-radius:6px; padding:10px 12px;'>"
+                            f"<div style='width:28px; border-top:3px solid #0E6E6E; margin-bottom:6px;'></div>"
+                            f"<div style='font-weight:600;'>{it['name']}</div>"
+                            f"<div style='font-size:0.8rem; color:#555; margin-top:4px;'>{due_badge(it, today)}</div>"
+                            f"</div>",
+                            unsafe_allow_html=True
+                        )
+
+                        # 카드 이동 버튼 (상태에 따라 다른 버튼)
+                        if status == "todo":
+                            st.button("▶ 시작하기", key=f"kb_{ver}_{i}_start", width="stretch",
+                                      on_click=move_task, args=(i, "doing"))
+                        elif status == "doing":
+                            b1, b2 = st.columns(2)
+                            b1.button("◀ 대기", key=f"kb_{ver}_{i}_back", width="stretch",
+                                      on_click=move_task, args=(i, "todo"))
+                            b2.button("✅ 완료", key=f"kb_{ver}_{i}_done", width="stretch",
+                                      type="primary", on_click=move_task, args=(i, "done"))
+                        else:
+                            st.button("↩ 다시 진행", key=f"kb_{ver}_{i}_reopen", width="stretch",
+                                      on_click=move_task, args=(i, "doing"))
+
+        st.caption("💡 작업은 작게 나누고, DOING은 최소로 유지하고, DONE은 결과물을 전달했을 때 옮기세요.")
+
+        if all(kanban_status(it) == "done" for _, it in tasks):
             st.success("모든 담당 업무를 완료했어요! 🎉")
 
-        with st.expander(f"✅ 완료한 업무 {len(done)}건"):
-            for i, it in done:
-                key = f"today_done_{ver}_{i}"
-                st.checkbox(it["name"], value=True, key=key,
-                            on_change=save_today_done, args=(i, key))
-            st.caption("체크를 해제하면 미완료 목록으로 돌아가요.")
-
 # ══════════════════════════════════════════════════
-# 메뉴 7: 🗂️ 회의 자료실 (날짜/시간별 보존 및 조회)
+# 메뉴 7: 🗂️ 회의 자료실 (날짜/시간별 보존 및 조회 + 업무 보고서 다운로드)
+#  - 화면은 위에서 만든 meeting_archive.py의 show_meeting_archive() 함수가 그림
+#  - ⚠️ 위의 meeting_archive.py 셀을 먼저 실행해야 함 (GitHub에도 함께 올려야 배포 앱에서 동작)
 # ══════════════════════════════════════════════════
 elif page == PAGES[6]:
-    st.subheader("🗂️ 회의 자료실")
-    st.caption(
-        "업로드한 회의록을 조회하고, "
-        "현재 작업 문서로 불러오거나 삭제할 수 있습니다."
-    )
+    from meeting_archive import show_meeting_archive
 
-    archives = st.session_state.archived_meetings
-    if not archives:
-        st.info("아직 저장된 회의 자가 없습니다.")
-    else:
-        st.markdown(f"**총 보존 회의록:** `{len(archives)}건`")
-        # ====================================================
-        # 회의 자료실: 문서 조회 / 불러오기 / 2단계 삭제
-        # ====================================================
+    # 보고서의 '우선순위' 칸: '📊 업무 우선순위 분석' 메뉴와 같은 4분면 기준
+    def archive_classify(urgent, important):
+        if urgent == "높음" and important == "높음":
+            return "Q1 · 즉시 착수"
+        elif urgent == "낮음" and important == "높음":
+            return "Q2 · 일정 확보"
+        elif urgent == "높음" and important == "낮음":
+            return "Q3 · 신속 처리 검토"
+        else:
+            return "Q4 · 후순위 검토"
 
-        for idx, item in enumerate(reversed(archives), 1):
-
-            # 기존 아카이브 데이터에 고유 ID가 없는 경우 생성
-            if "document_id" not in item:
-                item["document_id"] = str(uuid.uuid4())
-
-            document_id = item["document_id"]
-
-            with st.expander(
-                f"🕒 [{item['time']}] {item['title']}",
-                expanded=(idx == 1)
-            ):
-
-                # 1. 문서 정보 표시
-                st.caption(
-                    f"등록 시각: {item['time']}"
-                )
-
-                st.text_area(
-                    "회의록 원문",
-                    item["content"],
-                    height=200,
-                    key=f"arc_view_{document_id}"
-                )
-
-                # 2. 현재 작업 문서로 불러오기
-                if st.button(
-                    "📥 이 문서를 현재 작업 문서로 다시 불러오기",
-                    key=f"restore_{document_id}"
-                ):
-
-                    st.session_state.uploaded_docs[
-                        item["title"]
-                    ] = item["content"]
-
-                    st.session_state.active_doc = item["title"]
-
-                    st.success(
-                        f"'{item['title']}' 문서를 불러왔습니다!"
-                    )
-
-                    st.rerun()
-
-                # 3. 문서 삭제 관리
-                with st.expander("⚙️ 문서 관리"):
-
-                    # STEP 1: 삭제 요청
-                    if st.session_state.delete_target != document_id:
-
-                        if st.button(
-                            "🗑️ 문서 삭제",
-                            key=f"delete_request_{document_id}"
-                        ):
-
-                            st.session_state.delete_target = document_id
-
-                            st.rerun()
-
-                    # STEP 2: 최종 확인
-                    else:
-
-                        st.warning(
-                            "⚠️ 정말 이 문서를 삭제하시겠습니까?"
-                        )
-
-                        st.caption(
-                            "삭제하면 회의 자료실에서 제거됩니다."
-                        )
-
-                        col_cancel, col_delete = st.columns(2)
-
-                        # 삭제 취소
-                        with col_cancel:
-
-                            if st.button(
-                                "취소",
-                                key=f"cancel_{document_id}",
-                                use_container_width=True
-                            ):
-
-                                st.session_state.delete_target = None
-
-                                st.rerun()
-
-                        # 최종 삭제
-                        with col_delete:
-
-                            if st.button(
-                                "최종 삭제",
-                                key=f"confirm_delete_{document_id}",
-                                type="primary",
-                                use_container_width=True
-                            ):
-
-                                # 아카이브에서 해당 문서 삭제
-                                st.session_state.archived_meetings = [
-                                    doc
-                                    for doc in st.session_state.archived_meetings
-                                    if doc.get("document_id") != document_id
-                                ]
-
-                                # 현재 작업 목록에서도 해당 문서 제거
-                                st.session_state.uploaded_docs.pop(
-                                    item["title"],
-                                    None
-                                )
-
-                                # 삭제한 문서가 현재 작업 문서라면 변경
-                                if st.session_state.active_doc == item["title"]:
-
-                                    remaining = list(
-                                        st.session_state.uploaded_docs.keys()
-                                    )
-
-                                    st.session_state.active_doc = (
-                                        remaining[0]
-                                        if remaining
-                                        else ""
-                                    )
-
-                                # 삭제 확인 상태 초기화
-                                st.session_state.delete_target = None
-
-                                st.success("문서가 삭제되었습니다.")
-
-                                st.rerun()
+    show_meeting_archive(classify_func=archive_classify)
+    if not st.session_state.archived_meetings:
+        st.info("아직 보관된 회의록이 없습니다. 사이드바에서 문서를 업로드하면 이곳에 등록 시각과 함께 보관됩니다.")
