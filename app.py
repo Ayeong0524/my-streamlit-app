@@ -1104,136 +1104,970 @@ from difflib import SequenceMatcher
 def kst_today():
     return datetime.now(ZoneInfo("Asia/Seoul")).date()
 
+# ── ① 일정 추출용 출력 스키마 (05 실습 JSON 구조화) ──
+schedule_schema = {
+    "type": "json_schema",
+    "name": "schedule",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "김대리업무": {                      # 김 대리 업무 목록 (기한 없어도 포함)
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "일정명": {"type": "string"},
+                            "기한표현": {"type": ["string", "null"]},
+                            "기한일수": {"type": ["integer", "null"]}
+                        },
+                        "required": ["일정명", "기한표현", "기한일수"],
+                        "additionalProperties": False
+                    }
+                },
+                "주요일정": {                        # 출시일 같은 전체 일정
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "일정명": {"type": "string"},
+                            "기한표현": {"type": ["string", "null"]},
+                            "기한일수": {"type": ["integer", "null"]}
+                        },
+                        "required": ["일정명", "기한표현", "기한일수"],
+                        "additionalProperties": False
+                    }
+                }
+            },
+            "required": ["김대리업무", "주요일정"],
+            "additionalProperties": False
+        }
+    }
 
-# [최초 설정: 팀 실습용 서비스 계정 연결]
-# 1) Colab 설치 셀: !pip install -q google-api-python-client google-auth
-# 2) Google Cloud 프로젝트에서 Google Calendar API 사용 설정.
-# 3) 서비스 계정 생성 후 JSON 키를 받아 Colab에 service_account.json으로 업로드.
-#    키 파일은 팀 공유 코드/Git에 넣지 않습니다.
-# 4) Google 캘린더 설정에서 사용할 캘린더를 서비스 계정의 client_email에
-#    '일정 변경' 권한으로 공유. 캘린더 통합 메뉴의 '캘린더 ID' 복사.
-# 5) Streamlit 실행 전에 Colab에서 아래 환경변수 설정:
-#    import os
-#    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = '/content/service_account.json'
-#    os.environ['GOOGLE_CALENDAR_ID'] = '복사한 캘린더 ID'
-# 6) 기존 기본 app.py 셀 → 이 캘린더 셀 → 팔로업 → 브리핑 순서로 한 번씩 실행.
-# Streamlit Cloud: secrets의 gcal_service_account 표에 JSON 키 필드,
-# GOOGLE_CALENDAR_ID에 캘린더 ID 설정도 지원합니다.
-# 공유한 캘린더에 이 앱 사용자가 쓸 수 있으므로 팀 실습용 비공개 앱에서 사용하세요.
-# 일반 사용자별 Google 로그인은 별도의 OAuth 웹 인증 구성이 필요합니다.
-import os
-import json
-import re
+schedule_template = """
+회의록에서 김대리업무와 주요일정을 추출하세요.
+
+[김대리업무]
+- 김 대리에게 배정된 업무를 업무 하나당 한 항목씩 빠짐없이 모두 적으세요.
+- 기한이 없는 업무도 반드시 포함하세요. (기한표현, 기한일수는 null)
+- 일정명은 회의록의 구체적인 업무명으로 쓰세요.
+- 보고서 제출처럼 업무의 결과물 기한은 별도 항목으로 만들지 말고, 그 업무의 기한으로 적으세요.
+
+[주요일정]
+- 신제품 출시일처럼 회의에서 시점이 정해진 전체 일정만 적으세요.
+- 다음 회의, 진행 상황 점검처럼 회의 운영 일정은 제외하세요.
+- 김대리업무에 적은 업무는 다시 적지 마세요.
+
+[기한 규칙]
+- 기한표현: 회의록에 나온 시한 표현을 그대로 적고, 없으면 null로 하세요.
+- 기한일수: 회의 날로부터 며칠 뒤인지 정수로 적으세요.
+  '다음 주까지'는 7, '2주 안에'는 14처럼 회의 날 기준으로 정할 수 있을 때만 적습니다.
+  '다음 달 초'처럼 정하기 어렵거나, '출시 2주 전'처럼 다른 일정을 기준으로 한 시점이거나,
+  기한이 없으면 null로 하세요.
+
+회의록에 없는 내용은 지어내지 마세요.
+
+[회의록]
+{meeting}
+"""
+
+# ── ② 날짜 계산 (계산은 파이썬이 담당 → 결과가 항상 일관됨) ──
+def calc_due(base, expr, days):
+    """기준일 + 기한일수로 마감일 계산. '다음 달'이면 다음 달 1일. 못 정하면 None"""
+    if days is not None:
+        return base + timedelta(days=days)
+    if expr and "다음 달" in expr:
+        return (base.replace(day=1) + timedelta(days=32)).replace(day=1)
+    return None
+
+# ============================================================
+# 업무 고유 ID 및 변경 이력 관리
+# ============================================================
+# 기능:
+# 1. 업무마다 고유 ID 부여
+# 2. 기존 업무와 신규 업무의 유사도 비교
+# 3. 업무가 수정되면 기존 ID 유지
+# 4. 변경 전후 내용을 이력으로 보관
+#
+# 주의:
+# 유사도가 높다고 자동으로 같은 업무라고 확정하지 않음
+# 최종 판단은 사용자가 수행
+# ============================================================
+
+def create_task_id():
+    """업무별 고유 ID 생성"""
+    return str(uuid.uuid4())
 
 
-def kst_now_str():
-    return datetime.now(ZoneInfo('Asia/Seoul')).isoformat(timespec='seconds')
+def compare_task_names(old_name, new_name):
+    """두 업무명의 문자열 유사도 계산"""
+
+    old_name = re.sub(r"\s+", "", old_name)
+    new_name = re.sub(r"\s+", "", new_name)
+
+    return SequenceMatcher(
+        None,
+        old_name,
+        new_name
+    ).ratio()
 
 
-def able_google_client():
-    from google.oauth2 import service_account
-    from googleapiclient.discovery import build
-    calendar_id = os.getenv('GOOGLE_CALENDAR_ID', '')
-    key_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS', '')
-    scopes = ['https://www.googleapis.com/auth/calendar.events']
-    if key_path:
-        creds = service_account.Credentials.from_service_account_file(key_path, scopes=scopes)
-    else:
-        try:
-            info = dict(st.secrets['gcal_service_account'])
-        except Exception:
-            raise ValueError('Google 연결 설정이 없습니다. 제공한 코드 상단의 최초 설정을 완료해 주세요.') from None
-        creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
-    if not calendar_id:
-        try:
-            calendar_id = st.secrets['GOOGLE_CALENDAR_ID']
-        except Exception:
-            raise ValueError('GOOGLE_CALENDAR_ID를 설정해 주세요.') from None
-    if calendar_id == 'primary':
-        raise ValueError('서비스 계정에는 공유한 캘린더의 실제 ID를 입력해 주세요.')
-    return build('calendar', 'v3', credentials=creds, cache_discovery=False), calendar_id
+def update_task_history(task, new_due, meeting_date, source):
+    """기존 업무의 마감일을 수정하고 변경 이력을 저장"""
+
+    # 기존 일정과 변경된 일정 비교
+    old_due = task["due"]
+
+    # 변경 이력 저장 공간이 없다면 생성
+    task.setdefault("history", [])
+
+    # 업무 변경 사항 기록
+    task["history"].append({
+        "meeting_date": meeting_date,
+        "old_due": old_due,
+        "new_due": new_due,
+        "source": source,
+        "updated_at": kst_now_str()
+    })
+
+    # 기존 업무의 마감일 변경
+    task["due"] = new_due
 
 
-def able_event_payload(task):
-    due = task['due']
-    description = '\n'.join([
-        task.get('detail', ''),
-        '종류: ' + task.get('kind', ''),
-        '상태: ' + ('완료' if task.get('done') else '미완료'),
-        '원문 기한: ' + (task.get('expr') or '기록에 없음'),
-        '출처: ' + str(task.get('source', '')),
-    ])
+def find_similar_tasks(new_name, schedule, threshold=0.65):
+    """기존 일정 중 유사한 업무 후보를 검색"""
+
+    candidates = []
+
+    for task in schedule:
+
+        similarity = compare_task_names(
+            task["name"],
+            new_name
+        )
+
+        if similarity >= threshold:
+
+            candidates.append({
+                "task": task,
+                "similarity": similarity
+            })
+
+    # 유사도가 높은 순서로 정렬
+    return sorted(
+        candidates,
+        key=lambda x: x["similarity"],
+        reverse=True
+    )
+
+
+def get_source_hash(content, meeting_date):
+    """동일 회의록을 반복 분석했는지 확인하는 식별값"""
+
+    raw = f"{meeting_date.isoformat()}\n{content}"
+
+    return hashlib.sha256(
+        raw.encode("utf-8")
+    ).hexdigest()
+
+# ============================================================
+# 회의록 날짜 자동 인식
+# ============================================================
+# 지원 형식:
+# 2026-11-04
+# 2026.11.04
+# 2026/11/04
+# 2026년 11월 4일
+#
+# 주의:
+# 회의 날짜 또는 회의 일시로 표시된 항목만 우선 탐색
+# 날짜를 확인하지 못하면 None 반환
+# ============================================================
+
+def extract_meeting_date(text):
+
+    # 회의 날짜가 표시된 행을 우선 검색
+    patterns = [
+        r"회의\s*일시\s*[:：]\s*(\d{4})[-./년]\s*(\d{1,2})[-./월]\s*(\d{1,2})",
+        r"회의\s*날짜\s*[:：]\s*(\d{4})[-./년]\s*(\d{1,2})[-./월]\s*(\d{1,2})",
+        r"회의일\s*[:：]\s*(\d{4})[-./년]\s*(\d{1,2})[-./월]\s*(\d{1,2})",
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(pattern, text)
+
+        if match:
+
+            try:
+
+                year, month, day = map(
+                    int,
+                    match.groups()
+                )
+
+                return date(year, month, day)
+
+            except ValueError:
+
+                continue
+
+    # 회의일을 확인하지 못했다면 임의로 지정하지 않음
+    return None
+
+def create_schedule_task(name, kind, expr, due, source, meeting_date):
+    """기존 일정 데이터 구조를 유지하며 신규 업무 생성"""
+
     return {
-        'summary': ('[완료] ' if task.get('done') else '') + task['name'],
-        'description': description,
-        'start': {'date': due.isoformat()},
-        'end': {'date': (due + timedelta(days=1)).isoformat()},
-        'extendedProperties': {'private': {'able_task_id': task['task_id']}},
+        "task_id": create_task_id(),
+        "name": name,
+        "kind": kind,
+        "expr": expr,
+        "due": due,
+        "use": due is not None, # 기한이 없는 업무는 임의 날짜로 달력에 표시하지 않음
+        "done": False,
+        "source": source,
+        "meeting_date": meeting_date,
+        "history": []
     }
 
 
-def able_sync_google(tasks, service, calendar_id):
-    """한 버튼으로 일괄 처리. 성공한 업무는 유지하고 실패 항목은 별도로 보고."""
-    report = []
-    for task in tasks:
-        if task.get('due') is None or not task.get('use'):
-            continue
-        # 동일 task_id 재시도는 새 이벤트를 만들지 않고 기존 이벤트를 갱신.
-        event_id = 'able' + hashlib.sha256(task['task_id'].encode()).hexdigest()
-        body = able_event_payload(task)
-        try:
+def make_milestones(name, due, base):
+    """마감일 기준 D-14, D-7, D-1, D-day 생성 (기준일보다 이전 날짜는 제외)"""
+    rows = []
+    for label, before in [("D-14", 14), ("D-7", 7), ("D-1", 1), ("D-day", 0)]:
+        day = due - timedelta(days=before)
+        if day >= base:
+            rows.append({"날짜": day, "단계": label, "일정명": name,
+                         "제목": f"[{label}] {name}"})
+    return rows
+
+# ── ③ 캘린더 파일(.ics) 만들기 → 어떤 캘린더에서도 열면 바로 등록 ──
+def make_ics(rows):
+    lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Able//Action Scheduler//KO"]
+    for i, r in enumerate(rows):
+        lines += ["BEGIN:VEVENT",
+                  f"UID:able-{r['날짜']:%Y%m%d}-{i}@able",
+                  f"DTSTAMP:{date.today():%Y%m%d}T000000Z",
+                  f"DTSTART;VALUE=DATE:{r['날짜']:%Y%m%d}",
+                  f"DTEND;VALUE=DATE:{r['날짜'] + timedelta(days=1):%Y%m%d}",
+                  f"SUMMARY:{r['제목']}",
+                  "END:VEVENT"]
+    lines.append("END:VCALENDAR")
+    return "\r\n".join(lines)
+
+# ── ④ 업무 상태 · 남은 기간 표시 (달력 색상과 정렬용) # 동글뱅이 4~5번. 코드 수정 안해도되는지 검토ㄱ) ──
+def task_status(due, done, today):
+    """(아이콘, 상태, 정렬 순서) 반환: 완료 → 기한 경과 → 마감 임박 → 예정"""
+    if done:
+        return "✅", "완료", 3
+    if due < today:
+        return "🔴", "기한 경과", 0
+    if (due - today).days <= 3:
+        return "🟠", "마감 임박", 1
+    return "🔵", "예정", 2
+
+# ============================================================
+# 회의록 날짜 자동 인식
+# ============================================================
+# 지원 형식:
+# 2026-11-04
+# 2026.11.04
+# 2026/11/04
+# 2026년 11월 4일
+#
+# 주의:
+# 회의 날짜 또는 회의 일시로 표시된 항목만 우선 탐색
+# 날짜를 확인하지 못하면 None 반환
+# ============================================================
+
+def extract_meeting_date(text):
+
+    # 회의 날짜가 표시된 행을 우선 검색
+    patterns = [
+        r"회의\s*일시\s*[:：]\s*(\d{4})[-./년]\s*(\d{1,2})[-./월]\s*(\d{1,2})",
+        r"회의\s*날짜\s*[:：]\s*(\d{4})[-./년]\s*(\d{1,2})[-./월]\s*(\d{1,2})",
+        r"회의일\s*[:：]\s*(\d{4})[-./년]\s*(\d{1,2})[-./월]\s*(\d{1,2})",
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(pattern, text)
+
+        if match:
+
             try:
-                result = service.events().get(calendarId=calendar_id, eventId=event_id).execute()
-            except Exception as exc:
-                if getattr(getattr(exc, 'resp', None), 'status', None) != 404:
-                    raise
+
+                year, month, day = map(
+                    int,
+                    match.groups()
+                )
+
+                return date(year, month, day)
+
+            except ValueError:
+
+                continue
+
+    # 회의일을 확인하지 못했다면 임의로 지정하지 않음
+    return None
+
+def deadline_label(due, today):
+    """D-3, 오늘 마감, 2일 경과처럼 남은 기간을 글로 표시"""
+    days_left = (due - today).days
+    if days_left < 0:
+        return f"{-days_left}일 경과"
+    return "오늘 마감" if days_left == 0 else f"D-{days_left}"
+
+def sort_tasks(items, today):
+    """미완료·급한 업무가 먼저 오도록 정렬"""
+    return sorted(items, key=lambda it: (task_status(it["due"], it["done"], today)[2], it["name"]))
+
+# ── 달력 버튼 동작 (on_click 콜백: 화면을 다시 그리기 전에 실행되어 한 번에 반영) ──
+def move_month(offset):
+    view = st.session_state.cal_view
+    year, month0 = divmod(view.year * 12 + view.month - 1 + offset, 12)   # 연도가 바뀌어도 정확
+    st.session_state.cal_view = date(year, month0 + 1, 1)
+
+def go_today():
+    st.session_state.cal_view = kst_today().replace(day=1)
+    st.session_state.cal_selected = kst_today()
+
+def select_day(day):
+    st.session_state.cal_selected = day
+
+# ── ⑤ 세션 상태 초기화 (메뉴를 옮겨도 일정·달력 위치 유지) ── (각각 주석 달기?!!!!)
+if "messages_dict" not in st.session_state:
+    st.session_state.messages_dict = {}       # {문서명: [메시지들]} 형태로 문서별 대화 분리
+if "uploaded_docs" not in st.session_state:
+    st.session_state.uploaded_docs = {}       # {문서명: 본문내용}
+if "archived_meetings" not in st.session_state:
+    st.session_state.archived_meetings = []   # [{"시간": ..., "제목": ..., "내용": ...}] 삭제되어도 계속 유지
+if "active_doc" not in st.session_state:
+    st.session_state.active_doc = ""
+if "notice" not in st.session_state:
+    st.session_state.notice = None
+if "last_audio" not in st.session_state:
+    st.session_state.last_audio = None
+    st.session_state.play_audio = False
+if "schedule" not in st.session_state:
+    st.session_state.schedule = []
+if "sched_ver" not in st.session_state:
+    st.session_state.sched_ver = 0
+if "cal_base" not in st.session_state:
+    st.session_state.cal_base = kst_today()
+if "cal_view" not in st.session_state:
+    st.session_state.cal_view = kst_today().replace(day=1)
+if "cal_selected" not in st.session_state:
+    st.session_state.cal_selected = kst_today()
+if "followups" not in st.session_state:
+    st.session_state.followups = []
+if "fu_ver" not in st.session_state:
+    st.session_state.fu_ver = 0
+if "briefing" not in st.session_state:
+    st.session_state.briefing = None
+
+# ── ⑥ 화면 ───────────────────────────────────────
+if page == PAGES[2]:
+    st.subheader("📅 마감 캘린더")
+    st.caption("회의록을 바꿔가며 일정을 추출해도, 기존 일정을 날리지 않고 중복 없이 누적하여 캘린더에 병합합니다.")
+
+    # ① 일정 추출
+    # 회의록 날짜 자동 인식 + 수동 수정 기능
+
+    detected_date = extract_meeting_date(current_meeting)
+
+    # 현재 문서별로 날짜 입력 상태를 구분
+    document_key = hashlib.sha256(
+        current_meeting.encode("utf-8")
+    ).hexdigest()[:12]
+
+    date_key = f"meeting_date_{document_key}"
+
+    # 새 문서를 처음 선택한 경우에만 날짜 초기화
+    if date_key not in st.session_state:
+
+        if detected_date:
+            st.session_state[date_key] = detected_date
+        else:
+            st.session_state[date_key] = kst_today()
+
+    # 회의 날짜 자동 인식 여부 표시
+    if detected_date:
+
+        st.success(
+            f"✅ 회의 날짜 자동 인식: {detected_date}"
+        )
+
+    else:
+
+        st.warning(
+            "⚠️ 회의록에서 회의 날짜를 확인하지 못했습니다. "
+            "아래에서 회의 날짜를 직접 선택해 주세요."
+        )
+
+    c1, c2 = st.columns(
+        [1, 1],
+        vertical_alignment="bottom"
+    )
+
+    # 자동 인식한 날짜도 사용자가 수정 가능
+    base_day = c1.date_input(
+        "회의 날짜 (기한 계산 기준일)",
+        key=date_key
+    )
+
+    # 기존 코드와 호환되도록 상태 유지
+    st.session_state.cal_base = base_day
+
+    if c2.button("🔍 회의록에서 일정 추출", type="primary", use_container_width=True):
+        if not current_meeting:
+            st.warning("먼저 사이드바에서 회의록 파일을 업로드해 주세요.")
+        else:
+            try:
+                with st.spinner("신규 일정 추출 및 기존 캘린더와 병합 중.."):
+                    response = client.responses.create(
+                        model="gpt-4o-mini",
+                        input=[{"role": "user",
+                                "content": schedule_template.format(meeting=current_meeting)}],
+                        text={"format": schedule_schema},
+                        temperature=0
+                    )
+                    data = json.loads(response.output_text)
+
+                # ====================================================
+                # 기존 일정과 신규 추출 업무 비교
+                # ====================================================
+                # 자동으로 병합하지 않고 검토 대기 목록 생성
+                # 동일 회의록을 반복 분석하면 중복 생성 방지
+                # ====================================================
+
+                source_hash = get_source_hash(
+                    current_meeting,
+                    base_day
+                )
+
+                if "processed_meetings" not in st.session_state:
+                    st.session_state.processed_meetings = set()
+
+                # 동일한 회의록의 중복 처리 방지
+                if source_hash in st.session_state.processed_meetings:
+
+                    st.info(
+                        "이미 분석하여 등록한 회의록입니다. "
+                        "기존 업무와 변경 이력을 확인해 주세요."
+                    )
+
+                else:
+
+                    pending = []
+
+                    for kind, items in [
+                        ("김 대리 업무", data["김대리업무"]),
+                        ("주요 일정", data["주요일정"])
+                    ]:
+
+                        for item in items:
+
+                            # 구분 이름만 있는 빈 항목은 건너뛰기
+                            if item["일정명"] in (
+                                "김 대리 업무",
+                                "주요 일정"
+                            ):
+                                continue
+
+                            name = item["일정명"]
+
+                            # 기존 기한 처리 규칙 유지
+                            expr = (
+                                item["기한표현"]
+                                if item["기한표현"] not in (
+                                    None, "", "null"
+                                )
+                                else None
+                            )
+
+                            days = item["기한일수"]
+
+                            if expr and re.search(
+                                r"\d+\s*(주|일)\s*전",
+                                expr
+                            ):
+                                days = None
+
+                            due = calc_due(
+                                base_day,
+                                expr,
+                                days
+                            )
+
+                            # 기존 업무와 유사한 후보 검색
+                            candidates = find_similar_tasks(
+                                name,
+                                st.session_state.schedule
+                            )
+
+                            # 신규 추출 결과를 검토 대기 목록에 저장
+                            pending.append({
+                                "name": name,
+                                "kind": kind,
+                                "expr": expr,
+                                "due": due,
+                                "source": st.session_state.active_doc,
+                                "meeting_date": base_day,
+                                "candidates": [
+                                    c["task"]["task_id"]
+                                    for c in candidates
+                                ]
+                            })
+
+                    st.session_state.pending_schedule = pending
+                    st.session_state.pending_source_hash = source_hash
+
+                    st.success(
+                        f"✅ {len(pending)}건의 업무를 추출했습니다. "
+                        "아래에서 신규 등록 또는 기존 업무 수정 여부를 확인해 주세요."
+                    )
+                    # 수정 : 아래와 # 신규 업무~사용자 확인 전까지 범위 삭제 해야 하는건지...?
+            except Exception as e:
+                st.error(f"오류: {e}")
+
+    # ============================================================
+    # 신규 업무 / 기존 업무 수정 여부 사용자 확인
+    # ============================================================
+    # 유사한 업무가 있으면 기존 업무 수정을 우선 제안
+    # 사용자가 최종 확인해야만 일정에 반영
+    # ============================================================
+
+    pending = st.session_state.get(
+        "pending_schedule",
+        []
+    )
+
+    if pending:
+
+        st.markdown("### 🔎 신규 업무 및 변경사항 검토")
+
+        for idx, item in enumerate(pending):
+
+            with st.container(border=True):
+
+                st.markdown(
+                    f"**📌 {item['name']}**"
+                )
+
+                st.caption(
+                    f"회의일: {item['meeting_date']} | "
+                    f"마감일: {item['due'] or '미정'}"
+                )
+
+                # 기존 일정 중 유사 업무 후보 확인
+                candidates = [
+                    task
+                    for task in st.session_state.schedule
+                    if task["task_id"] in item["candidates"]
+                ]
+
+                # 유사 업무가 없으면 신규 업무로 등록
+                if not candidates:
+
+                    st.info(
+                        "기존 일정에서 유사한 업무를 찾지 못했습니다."
+                    )
+
+                    action = "신규 업무로 등록"
+
+                    selected_task = None
+
+                else:
+
+                    st.warning(
+                        "⚠️ 기존 업무와 유사한 일정이 발견되었습니다."
+                    )
+
+                    # 사용자에게 신규/수정 여부 선택 요청
+                    options = ["신규 업무로 등록"]
+
+                    options += [
+                        (
+                            f"기존 업무 수정: {task['name']} "
+                            f"(마감 {task['due']})"
+                        )
+                        for task in candidates
+                    ]
+
+                    selected_option = st.radio(
+                        "이 업무를 어떻게 처리하시겠습니까?",
+                        options,
+                        key=f"task_action_{idx}"
+                    )
+
+                    action = selected_option
+
+                    selected_task = None
+
+                    # 기존 업무 수정 선택 시 대상 업무 확인
+                    if selected_option != "신규 업무로 등록":
+
+                        selected_index = options.index(
+                            selected_option
+                        ) - 1
+
+                        selected_task = candidates[selected_index]
+
+                # 사용자가 확인한 경우에만 반영
+                if st.button(
+                    "✅ 확인 및 적용",
+                    key=f"confirm_task_{idx}"
+                ):
+
+                    if selected_task is None:
+
+                        new_task = create_schedule_task(
+                            item["name"],
+                            item["kind"],
+                            item["expr"],
+                            item["due"],
+                            item["source"],
+                            item["meeting_date"]
+                        )
+
+                        st.session_state.schedule.append(
+                            new_task
+                        )
+
+                        st.success("신규 업무가 등록되었습니다.")
+
+                    else:
+
+                        update_task_history(
+                            selected_task,
+                            item["due"],
+                            item["meeting_date"],
+                            item["source"]
+                        )
+
+                        st.success(
+                            "기존 업무가 수정되고 변경 이력이 저장되었습니다."
+                        )
+
+                    # 처리한 항목은 검토 대기 목록에서 제거
+                    st.session_state.pending_schedule.pop(idx)
+
+                    # 모든 항목 검토가 완료된 경우
+                    if not st.session_state.pending_schedule:
+
+                        st.session_state.processed_meetings.add(
+                            st.session_state.pending_source_hash
+                        )
+
+                    st.session_state.sched_ver += 1
+
+                    st.rerun()
+
+                    # 수정 : 들여쓰기가 잘 되어있는지 검토
+    schedule = st.session_state.schedule
+    ver = st.session_state.sched_ver
+
+
+    if not schedule:
+        st.info("회의록을 업로드한 뒤 '회의록에서 일정 추출'을 눌러 주세요.")
+    else:
+        # ② 일정 확인 및 수정 (고친 값은 일정 목록에 바로 저장 → 메뉴를 옮겨도 유지)
+        with st.expander("✏️ 일정 확인 및 수정 (날짜 정하기 · 완료 표시)"):
+            st.caption("기한이 없거나 애매한 일정은 날짜를 정한 뒤 '달력 표시'를 체크하세요.")
+            for i, it in enumerate(schedule):
+                a, b, c, d = st.columns([1, 3, 2, 1], vertical_alignment="center")
+                it["use"] = a.checkbox("달력 표시", value=it["use"], key=f"use_{ver}_{i}")
+                b.markdown(f"**{it['name']}** ({it['kind']})  \n<small>출처: {it.get('source', '알 수 없음')}</small>", unsafe_allow_html=True)
+                # 기한 미정 업무는 회의일 또는 오늘을 입력창의 초기값으로 제안
+                # 제안값은 확정 마감일이 아니며 사용자가 직접 확인해야 함
+                initial_due = it["due"] or it.get("meeting_date") or kst_today()
+
+                it["due"] = c.date_input(
+                    "마감일",
+                    value=initial_due,
+                    key=f"due_{ver}_{i}"
+                )
+                it["done"] = d.checkbox("완료", value=it["done"], key=f"done_{ver}_{i}")
+
+        today = kst_today()
+        active = [it for it in schedule if it["use"]]
+
+        # 날짜별 마감 업무 / 마일스톤 모으기
+        due_map, ms_map, rows = {}, {}, []
+        for it in active:
+            due_map.setdefault(it["due"], []).append(it)
+            for r in make_milestones(it["name"], it["due"], base_day):
+                rows.append(r)
+                if r["단계"] != "D-day":
+                    ms_map.setdefault(r["날짜"], []).append(r)
+
+        # ③ 달력 위쪽: 달 이동
+        st.divider()
+        view = st.session_state.cal_view
+        n1, n2, n3, n4 = st.columns([1, 3, 1, 1], vertical_alignment="center")
+        if n1.button("◀ 이전 달", use_container_width=True):
+            y, m = (view.year, view.month - 1) if view.month > 1 else (view.year - 1, 12)
+            st.session_state.cal_view = date(y, m, 1)
+            st.rerun()
+        n2.markdown(f"### {view.year}년 {view.month}월")
+        if n3.button("다음 달 ▶", use_container_width=True):
+            y, m = (view.year, view.month + 1) if view.month < 12 else (view.year + 1, 1)
+            st.session_state.cal_view = date(y, m, 1)
+            st.rerun()
+        if n4.button("오늘", use_container_width=True):
+            st.session_state.cal_view = today.replace(day=1)
+            st.session_state.cal_selected = today
+            st.rerun()
+        st.caption("🔴 기한 경과 · 🟠 마감 임박(3일 이내) · 🔵 예정 · ✅ 완료 · ⚪ 기한 미정 · ⏰ 마일스톤(D-14, D-7, D-1)")
+
+        # ④ 달력: 요일 머리글 + 날짜 칸 (월요일 시작)
+        head = st.columns(7)
+        for col, w in zip(head, ["월", "화", "수", "목", "금", "토", "일"]):
+            col.markdown(f"**{w}**")
+
+        for week in pycal.Calendar(firstweekday=0).monthdayscalendar(view.year, view.month):
+            cols = st.columns(7)
+            for col, d in zip(cols, week):
+                if d == 0:           # 이번 달이 아닌 빈 칸
+                    continue
+                day = date(view.year, view.month, d)
+                with col.container(border=True):
+                    label = f"{d}일 · 오늘" if day == today else f"{d}일"
+                    selected = day == st.session_state.cal_selected
+                    if st.button(label, key=f"cal_{day}", use_container_width=True, type="primary" if selected else "secondary"):
+                        st.session_state.cal_selected = day
+                        st.rerun()
+                    for it in due_map.get(day, [])[:2]:
+                        s_icon = "✅" if it["done"] else "🔴"
+                        st.caption(f"{s_icon} {it['name'][:9]}")
+
+                    # 칸이 너무 길어지지 않게 마감 업무는 2건까지, 제목은 14자까지만 #(수정 : 삭제할지 말지ㅠ)
+                    items = sort_tasks(due_map.get(day, []), today)
+                    if items:
+                        st.caption(f"마감 업무 {len(items)}건")
+                        for it in items[:2]:
+                            icon = task_status(it["due"], it["done"], today)[0]
+                            name = it["name"] if len(it["name"]) <= 14 else it["name"][:14] + "…"
+                            st.caption(f"{icon} {name}")
+                        if len(items) > 2:
+                            st.caption(f"외 {len(items) - 2}건")
+                    ms = ms_map.get(day, [])
+                    if ms:
+                        st.caption(f"⏰ 알림 {len(ms)}건 ({', '.join(r['단계'] for r in ms)})")
+
+        # ⑤ 선택한 날짜의 마감 업무
+        sel = st.session_state.cal_selected
+        st.markdown(f"#### 📌 {sel.month}월 {sel.day}일 마감 업무")
+        items = sort_tasks(due_map.get(sel, []), today) ### items = due_map.get(sel, []) (이걸로 수정 안해도 될지)
+        if not items:
+            st.info("선택한 날짜에 마감하는 업무가 없습니다.")
+        for it in items:
+            icon, status, _ = task_status(it["due"], it["done"], today)
+            with st.container(border=True):
+                st.markdown(f"**{it['name']}**")
+                st.caption(f"{icon} {status} · {it['kind']} · {deadline_label(it['due'], today)}")
+                st.caption(f"기한 근거(회의 표현): {it['expr'] or '회의록에 기한 표현 없음 · 직접 지정'}")
+        for r in ms_map.get(sel, []):
+            st.caption(f"⏰ {r['단계']} 알림: {r['일정명']} (마감 {r['날짜'] + timedelta(days=int(r['단계'][2:]))})")
+        if items:
+            st.caption("완료 여부는 위의 '일정 확인 및 수정'에서 변경할 수 있습니다.")
+
+        # ⑥ 기한 미정 업무
+        undecided = [it for it in schedule if not it["use"]]
+        with st.expander(f"⚪ 기한 미정 업무 {len(undecided)}건"):
+            if not undecided:
+                st.write("기한 미정 업무가 없습니다.")
+            for it in undecided:
+                st.markdown(f"**{'✅ 완료' if it['done'] else '⬜ 미완료'} · {it['name']}**")
+                st.caption(f"{it['kind']} · 기한 근거: {it['expr'] or '회의록에 기록 없음'} · "
+                           "'일정 확인 및 수정'에서 날짜를 정하고 '달력 표시'를 체크하면 달력에 나타납니다.")
+
+        # ⑦ 캘린더 파일 다운로드 (Google·Outlook·휴대폰 캘린더에서 열면 등록됨)
+        st.divider()
+        if rows:
+            rows.sort(key=lambda r: r["날짜"])
+            st.download_button("📥 캘린더 파일(.ics) 다운로드", data=make_ics(rows),
+                               file_name="able_schedule.ics", mime="text/calendar",
+                               type="primary", use_container_width=True)
+            st.caption(f"마일스톤 {len(rows)}개(D-14, D-7, D-1, D-day)가 담깁니다. "
+                       "파일을 열면 Google·Outlook·휴대폰 캘린더에 바로 등록됩니다.")
+    # ============================================================
+    # [최초 설정: 팀 실습용 서비스 계정 연결]
+    # 1) Colab 설치 셀: !pip install -q google-api-python-client google-auth
+    # 2) Google Cloud 프로젝트에서 Google Calendar API 사용 설정.
+    # 3) 서비스 계정 생성 후 JSON 키를 받아 Colab에 service_account.json으로 업로드.
+    #    키 파일은 팀 공유 코드/Git에 넣지 않습니다.
+    # 4) Google 캘린더 설정에서 사용할 캘린더를 서비스 계정의 client_email에
+    #    '일정 변경' 권한으로 공유. 캘린더 통합 메뉴의 '캘린더 ID' 복사.
+    # 5) Streamlit 실행 전에 Colab에서 아래 환경변수 설정:
+    #    import os
+    #    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = '/content/service_account.json'
+    #    os.environ['GOOGLE_CALENDAR_ID'] = '복사한 캘린더 ID'
+    # 6) 기존 기본 app.py 셀 → 이 캘린더 셀 → 팔로업 → 브리핑 순서로 한 번씩 실행.
+    # Streamlit Cloud: secrets의 gcal_service_account 표에 JSON 키 필드,
+    # GOOGLE_CALENDAR_ID에 캘린더 ID 설정도 지원합니다.
+    # 공유한 캘린더에 이 앱 사용자가 쓸 수 있으므로 팀 실습용 비공개 앱에서 사용하세요.
+    # 일반 사용자별 Google 로그인은 별도의 OAuth 웹 인증 구성이 필요합니다.
+    import os
+    import json
+    import re
+
+
+    def able_google_now_str():
+        return datetime.now(ZoneInfo('Asia/Seoul')).isoformat(timespec='seconds')
+
+
+    def able_google_client():
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        calendar_id = os.getenv('GOOGLE_CALENDAR_ID', '')
+        key_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS', '')
+        scopes = ['https://www.googleapis.com/auth/calendar.events']
+        if key_path:
+            creds = service_account.Credentials.from_service_account_file(key_path, scopes=scopes)
+        else:
+            try:
+                info = dict(st.secrets['gcal_service_account'])
+            except Exception:
+                raise ValueError('Google 연결 설정이 없습니다. 제공한 코드 상단의 최초 설정을 완료해 주세요.') from None
+            creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+        if not calendar_id:
+            try:
+                calendar_id = st.secrets['GOOGLE_CALENDAR_ID']
+            except Exception:
+                raise ValueError('GOOGLE_CALENDAR_ID를 설정해 주세요.') from None
+        if calendar_id == 'primary':
+            raise ValueError('서비스 계정에는 공유한 캘린더의 실제 ID를 입력해 주세요.')
+        return build('calendar', 'v3', credentials=creds, cache_discovery=False), calendar_id
+
+
+    def able_event_payload(task):
+        due = task['due']
+        if isinstance(due, str):
+            due = date.fromisoformat(due[:10])
+        description = '\n'.join([
+            task.get('detail', ''),
+            '종류: ' + task.get('kind', ''),
+            '상태: ' + ('완료' if task.get('done') else '미완료'),
+            '원문 기한: ' + (task.get('expr') or '기록에 없음'),
+            '출처: ' + str(task.get('source', '')),
+            '회의일: ' + str(task.get('meeting_date', '')),
+        ])
+        return {
+            'summary': ('[완료] ' if task.get('done') else '') + task['name'],
+            'description': description,
+            'start': {'date': due.isoformat()},
+            'end': {'date': (due + timedelta(days=1)).isoformat()},
+            'extendedProperties': {'private': {'able_task_id': task['task_id']}},
+        }
+
+
+    def able_sync_google(tasks, service, calendar_id):
+        """한 버튼으로 일괄 처리. 성공한 업무는 유지하고 실패 항목은 별도로 보고."""
+        report = []
+        for task in tasks:
+            if task.get('due') is None or not task.get('use'):
+                continue
+            # 동일 task_id 재시도는 새 이벤트를 만들지 않고 기존 이벤트를 갱신.
+            event_id = 'able' + hashlib.sha256(task['task_id'].encode()).hexdigest()
+            body = able_event_payload(task)
+            try:
                 try:
-                    result = service.events().insert(calendarId=calendar_id,
-                        body={**body, 'id': event_id}, sendUpdates='none').execute()
-                    action = '등록'
-                except Exception as conflict:
-                    if getattr(getattr(conflict, 'resp', None), 'status', None) != 409:
+                    result = service.events().get(calendarId=calendar_id, eventId=event_id).execute()
+                except Exception as exc:
+                    if getattr(getattr(exc, 'resp', None), 'status', None) != 404:
                         raise
+                    try:
+                        result = service.events().insert(calendarId=calendar_id,
+                            body={**body, 'id': event_id}, sendUpdates='none').execute()
+                        action = '등록'
+                    except Exception as conflict:
+                        if getattr(getattr(conflict, 'resp', None), 'status', None) != 409:
+                            raise
+                        result = service.events().patch(calendarId=calendar_id, eventId=event_id,
+                            body=body, sendUpdates='none').execute()
+                        action = '수정'
+                else:
+                    if result.get('status') == 'cancelled':
+                        raise ValueError('Google에서 삭제한 일정입니다. 새 업무로 등록해 주세요.')
                     result = service.events().patch(calendarId=calendar_id, eventId=event_id,
                         body=body, sendUpdates='none').execute()
                     action = '수정'
-            else:
-                if result.get('status') == 'cancelled':
-                    raise ValueError('Google에서 삭제한 일정입니다. 새 업무로 등록해 주세요.')
-                result = service.events().patch(calendarId=calendar_id, eventId=event_id,
-                    body=body, sendUpdates='none').execute()
-                action = '수정'
-            task['google_event_id'] = result['id']
-            task['google_synced_at'] = kst_now_str()
-            report.append({'업무': task['name'], '결과': action + ' 완료', '오류': ''})
-        except Exception as exc:
-            code = getattr(getattr(exc, 'resp', None), 'status', None)
-            reason = {401:'인증 만료 또는 인증 오류',403:'Calendar API 사용 설정·공유 권한을 확인하세요',
-                      404:'캘린더 ID 또는 공유 설정을 확인하세요',429:'요청 제한: 잠시 후 다시 시도하세요'}.get(code)
-            report.append({'업무':task['name'],'결과':'실패',
-                           '오류':reason or (str(exc) if isinstance(exc, ValueError) else '연결 오류: 다시 시도해 주세요')})
-    return report
+                task['google_event_id'] = result['id']
+                task['google_synced_at'] = able_google_now_str()
+                report.append({'업무': task['name'], '결과': action + ' 완료', '오류': ''})
+            except Exception as exc:
+                code = getattr(getattr(exc, 'resp', None), 'status', None)
+                reason = {401:'인증 만료 또는 인증 오류',403:'Calendar API 사용 설정·공유 권한을 확인하세요',
+                          404:'캘린더 ID 또는 공유 설정을 확인하세요',429:'요청 제한: 잠시 후 다시 시도하세요'}.get(code)
+                report.append({'업무':task['name'],'결과':'실패',
+                               '오류':reason or (str(exc) if isinstance(exc, ValueError) else '연결 오류: 다시 시도해 주세요')})
+        return report
 
 
-def able_run_sync():
-    candidates = [t for t in st.session_state.schedule if t.get('due') is not None and t.get('use')]
-    if not candidates:
-        st.warning('날짜를 정하고 달력 표시를 켠 업무가 없습니다.')
-        return
-    try:
-        service, calendar_id = able_google_client()
+    def able_run_sync():
+        for task in st.session_state.schedule:
+            if not task.get('task_id'):
+                task['task_id'] = str(uuid.uuid4())
+        candidates = [t for t in st.session_state.schedule if t.get('due') is not None and t.get('use')]
+        if not candidates:
+            st.warning('날짜를 정하고 달력 표시를 켠 업무가 없습니다.')
+            return
         try:
-            with st.spinner(f'{len(candidates)}개 업무를 Google 캘린더에 저장하고 있습니다…'):
-                report = able_sync_google(candidates, service, calendar_id)
-        finally:
-            service.close()
-        st.session_state.able_google_report = report
-    except ImportError:
-        st.session_state.able_google_report = [{'업무':'연결','결과':'실패','오류':'google-api-python-client와 google-auth를 설치해 주세요.'}]
-    except Exception as exc:
-        st.session_state.able_google_report = [{'업무':'연결','결과':'실패',
-            '오류':str(exc) if isinstance(exc, ValueError) else 'Google 연결 설정을 확인해 주세요.'}]
+            service, calendar_id = able_google_client()
+            try:
+                with st.spinner(f'{len(candidates)}개 업무를 Google 캘린더에 저장하고 있습니다…'):
+                    report = able_sync_google(candidates, service, calendar_id)
+            finally:
+                service.close()
+            st.session_state.able_google_report = report
+        except ImportError:
+            st.session_state.able_google_report = [{'업무':'연결','결과':'실패','오류':'google-api-python-client와 google-auth를 설치해 주세요.'}]
+        except Exception as exc:
+            st.session_state.able_google_report = [{'업무':'연결','결과':'실패',
+                '오류':str(exc) if isinstance(exc, ValueError) else 'Google 연결 설정을 확인해 주세요.'}]
 
+
+
+    st.divider()
+    st.subheader("🔗 외부 캘린더 연동")
+    st.caption("Streamlit에서 수정한 마감일과 완료 상태를 Google 캘린더에 한 번에 저장합니다.")
+    calendar_tasks = [t for t in st.session_state.schedule if t.get("due") is not None and t.get("use", False)]
+    st.caption(f"등록·수정 대상: {len(calendar_tasks)}건 · 날짜가 있고 ‘달력 표시’가 켜진 업무 전체 (완료 업무 포함)")
+    if st.button("🔵 Google Calendar에 전체 등록·수정", key="external_google_bulk", type="primary", disabled=not calendar_tasks):
+        able_run_sync()
+    if not calendar_tasks:
+        st.info("위에서 마감일을 정하고 ‘달력 표시’를 체크해 주세요.")
+    report = st.session_state.get("able_google_report")
+    if report:
+        failed = sum(row["결과"] == "실패" for row in report)
+        if failed:
+            st.warning(f"최근 전송 결과: 성공 {len(report)-failed}건 / 실패 {failed}건")
+        else:
+            st.success(f"최근 전송 결과: {len(report)}건을 Google 캘린더에 저장했습니다.")
+        st.dataframe(report, hide_index=True)
+    st.caption("Google 최초 연결 설정이 필요합니다. 같은 업무 ID는 재등록하지 않고 기존 일정을 수정합니다. 앱 세션 초기화로 업무 ID가 사라지면 중복 방지가 유지되지 않을 수 있습니다.")
+    st.caption("기한 미정·표시 해제 업무와 D-14·D-7·D-1 점검 일정은 전송하지 않습니다. 이미 Google에 저장한 일정은 표시를 해제해도 자동 삭제하지 않습니다.")
+
+# ══════════════════════════════════════════════════════════════
+# 메뉴 3: 마감 캘린더 (앱 안 달력 + .ics 다운로드)
+# 회의록 / 문서별 일정이 누적 병합되고, 다른 회의록을 추가해도 일정 중복을 방지합니다.
+#  - 이 셀은 app.py 끝에 "이어 붙이기"(-a) 합니다.
+#  - ⚠️ app.py 셀(%%writefile app.py)을 실행한 직후, 이 셀을 한 번만 실행하세요.
+# ══════════════════════════════════════════════════════════════
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+import calendar as pycal
+
+# 업무 고유 ID 생성 및 유사 업무 비교
+import uuid
+import hashlib
+from difflib import SequenceMatcher
+
+# 오늘 날짜는 한국 시간 기준 (Streamlit Cloud 서버는 UTC라 date.today()를 쓰면 오전 9시 전엔 하루 전 날짜가 됨)
+def kst_today():
+    return datetime.now(ZoneInfo("Asia/Seoul")).date()
 
 # ── ① 일정 추출용 출력 스키마 (05 실습 JSON 구조화) ──
 schedule_schema = {
@@ -1903,43 +2737,26 @@ if page == PAGES[2]:
     if not schedule:
         st.info("회의록을 업로드한 뒤 '회의록에서 일정 추출'을 눌러 주세요.")
     else:
-        # 모든 업무는 기한 유무와 무관하게 여기에서 편집합니다.
-        for task in schedule:
-            task.setdefault("task_id", create_task_id())
-        with st.expander("✏️ 전체 업무 수정 · 날짜 미정 업무에 날짜 지정", expanded=True):
-            st.caption("마감일은 빈칸에서도 선택할 수 있습니다. 수정 후 아래 저장 버튼을 누르세요.")
-            with st.form(f"able_schedule_editor_{ver}"):
-                edits = []
-                for it in schedule:
-                    ident = f"able_edit_{ver}_{it['task_id']}"
-                    st.markdown(f"**{it['name']}**")
-                    st.caption(f"원문 기한: {it.get('expr') or '기록에 없음'}")
-                    name = st.text_input("업무명", value=it['name'], key=ident+'_name')
-                    detail = st.text_area("일정 내용", value=it.get('detail', ''), key=ident+'_detail', height=80)
-                    c1, c2, c3 = st.columns([2, 1, 1])
-                    due = c1.date_input("마감일 (날짜 미정이면 비워두세요)", value=it.get('due'), key=ident+'_due')
-                    # 날짜가 없었던 업무는 날짜 지정 후 바로 달력에 표시되도록 기본 체크.
-                    use = c2.checkbox("달력 표시", value=it.get('use', False) or it.get('due') is None, key=ident+'_use')
-                    done = c3.checkbox("완료", value=it.get('done', False), key=ident+'_done')
-                    edits.append((it, name.strip(), detail, due, use, done))
-                    st.divider()
-                local_save = st.form_submit_button("수정 내용 저장")
-                google_save = st.form_submit_button("수정 저장 + Google 캘린더 전체 등록·수정", type="primary")
-                if local_save or google_save:
-                    if any(not name for _, name, _, _, _, _ in edits):
-                        st.error("업무명을 비워둘 수 없습니다.")
-                    else:
-                        for it, name, detail, due, use, done in edits:
-                            if due != it.get('due'):
-                                update_task_history(it, due, kst_today(), "Streamlit에서 직접 수정")
-                            it.update(name=name, detail=detail, due=due, use=bool(use and due is not None), done=done)
-                        if google_save:
-                            able_run_sync()
-                        st.session_state.sched_ver += 1
-                        st.rerun()
+        # ② 일정 확인 및 수정 (고친 값은 일정 목록에 바로 저장 → 메뉴를 옮겨도 유지)
+        with st.expander("✏️ 일정 확인 및 수정 (날짜 정하기 · 완료 표시)"):
+            st.caption("기한이 없거나 애매한 일정은 날짜를 정한 뒤 '달력 표시'를 체크하세요.")
+            for i, it in enumerate(schedule):
+                a, b, c, d = st.columns([1, 3, 2, 1], vertical_alignment="center")
+                it["use"] = a.checkbox("달력 표시", value=it["use"], key=f"use_{ver}_{i}")
+                b.markdown(f"**{it['name']}** ({it['kind']})  \n<small>출처: {it.get('source', '알 수 없음')}</small>", unsafe_allow_html=True)
+                # 기한 미정 업무는 회의일 또는 오늘을 입력창의 초기값으로 제안
+                # 제안값은 확정 마감일이 아니며 사용자가 직접 확인해야 함
+                initial_due = it["due"] or it.get("meeting_date") or kst_today()
+
+                it["due"] = c.date_input(
+                    "마감일",
+                    value=initial_due,
+                    key=f"due_{ver}_{i}"
+                )
+                it["done"] = d.checkbox("완료", value=it["done"], key=f"done_{ver}_{i}")
 
         today = kst_today()
-        active = [it for it in schedule if it["use"] and it.get("due") is not None]
+        active = [it for it in schedule if it["use"]]
 
         # 날짜별 마감 업무 / 마일스톤 모으기
         due_map, ms_map, rows = {}, {}, []
@@ -2022,7 +2839,7 @@ if page == PAGES[2]:
             st.caption("완료 여부는 위의 '일정 확인 및 수정'에서 변경할 수 있습니다.")
 
         # ⑥ 기한 미정 업무
-        undecided = [it for it in schedule if it.get("due") is None]
+        undecided = [it for it in schedule if not it["use"]]
         with st.expander(f"⚪ 기한 미정 업무 {len(undecided)}건"):
             if not undecided:
                 st.write("기한 미정 업무가 없습니다.")
@@ -2039,26 +2856,164 @@ if page == PAGES[2]:
                                file_name="able_schedule.ics", mime="text/calendar",
                                type="primary", use_container_width=True)
             st.caption(f"마일스톤 {len(rows)}개(D-14, D-7, D-1, D-day)가 담깁니다. "
-                       "파일 가져오기 방식입니다. 직접 일괄 저장은 아래 Google 연동을 사용하세요.")
+                       "파일을 열면 Google·Outlook·휴대폰 캘린더에 바로 등록됩니다.")
     # ============================================================
-    # Google Calendar API로 직접 일괄 등록·수정
+    # [최초 설정: 팀 실습용 서비스 계정 연결]
+    # 1) Colab 설치 셀: !pip install -q google-api-python-client google-auth
+    # 2) Google Cloud 프로젝트에서 Google Calendar API 사용 설정.
+    # 3) 서비스 계정 생성 후 JSON 키를 받아 Colab에 service_account.json으로 업로드.
+    #    키 파일은 팀 공유 코드/Git에 넣지 않습니다.
+    # 4) Google 캘린더 설정에서 사용할 캘린더를 서비스 계정의 client_email에
+    #    '일정 변경' 권한으로 공유. 캘린더 통합 메뉴의 '캘린더 ID' 복사.
+    # 5) Streamlit 실행 전에 Colab에서 아래 환경변수 설정:
+    #    import os
+    #    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = '/content/service_account.json'
+    #    os.environ['GOOGLE_CALENDAR_ID'] = '복사한 캘린더 ID'
+    # 6) 기존 기본 app.py 셀 → 이 캘린더 셀 → 팔로업 → 브리핑 순서로 한 번씩 실행.
+    # Streamlit Cloud: secrets의 gcal_service_account 표에 JSON 키 필드,
+    # GOOGLE_CALENDAR_ID에 캘린더 ID 설정도 지원합니다.
+    # 공유한 캘린더에 이 앱 사용자가 쓸 수 있으므로 팀 실습용 비공개 앱에서 사용하세요.
+    # 일반 사용자별 Google 로그인은 별도의 OAuth 웹 인증 구성이 필요합니다.
+    import os
+    import json
+    import re
+
+
+    def able_google_now_str():
+        return datetime.now(ZoneInfo('Asia/Seoul')).isoformat(timespec='seconds')
+
+
+    def able_google_client():
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        calendar_id = os.getenv('GOOGLE_CALENDAR_ID', '')
+        key_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS', '')
+        scopes = ['https://www.googleapis.com/auth/calendar.events']
+        if key_path:
+            creds = service_account.Credentials.from_service_account_file(key_path, scopes=scopes)
+        else:
+            try:
+                info = dict(st.secrets['gcal_service_account'])
+            except Exception:
+                raise ValueError('Google 연결 설정이 없습니다. 제공한 코드 상단의 최초 설정을 완료해 주세요.') from None
+            creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+        if not calendar_id:
+            try:
+                calendar_id = st.secrets['GOOGLE_CALENDAR_ID']
+            except Exception:
+                raise ValueError('GOOGLE_CALENDAR_ID를 설정해 주세요.') from None
+        if calendar_id == 'primary':
+            raise ValueError('서비스 계정에는 공유한 캘린더의 실제 ID를 입력해 주세요.')
+        return build('calendar', 'v3', credentials=creds, cache_discovery=False), calendar_id
+
+
+    def able_event_payload(task):
+        due = task['due']
+        if isinstance(due, str):
+            due = date.fromisoformat(due[:10])
+        description = '\n'.join([
+            task.get('detail', ''),
+            '종류: ' + task.get('kind', ''),
+            '상태: ' + ('완료' if task.get('done') else '미완료'),
+            '원문 기한: ' + (task.get('expr') or '기록에 없음'),
+            '출처: ' + str(task.get('source', '')),
+            '회의일: ' + str(task.get('meeting_date', '')),
+        ])
+        return {
+            'summary': ('[완료] ' if task.get('done') else '') + task['name'],
+            'description': description,
+            'start': {'date': due.isoformat()},
+            'end': {'date': (due + timedelta(days=1)).isoformat()},
+            'extendedProperties': {'private': {'able_task_id': task['task_id']}},
+        }
+
+
+    def able_sync_google(tasks, service, calendar_id):
+        """한 버튼으로 일괄 처리. 성공한 업무는 유지하고 실패 항목은 별도로 보고."""
+        report = []
+        for task in tasks:
+            if task.get('due') is None or not task.get('use'):
+                continue
+            # 동일 task_id 재시도는 새 이벤트를 만들지 않고 기존 이벤트를 갱신.
+            event_id = 'able' + hashlib.sha256(task['task_id'].encode()).hexdigest()
+            body = able_event_payload(task)
+            try:
+                try:
+                    result = service.events().get(calendarId=calendar_id, eventId=event_id).execute()
+                except Exception as exc:
+                    if getattr(getattr(exc, 'resp', None), 'status', None) != 404:
+                        raise
+                    try:
+                        result = service.events().insert(calendarId=calendar_id,
+                            body={**body, 'id': event_id}, sendUpdates='none').execute()
+                        action = '등록'
+                    except Exception as conflict:
+                        if getattr(getattr(conflict, 'resp', None), 'status', None) != 409:
+                            raise
+                        result = service.events().patch(calendarId=calendar_id, eventId=event_id,
+                            body=body, sendUpdates='none').execute()
+                        action = '수정'
+                else:
+                    if result.get('status') == 'cancelled':
+                        raise ValueError('Google에서 삭제한 일정입니다. 새 업무로 등록해 주세요.')
+                    result = service.events().patch(calendarId=calendar_id, eventId=event_id,
+                        body=body, sendUpdates='none').execute()
+                    action = '수정'
+                task['google_event_id'] = result['id']
+                task['google_synced_at'] = able_google_now_str()
+                report.append({'업무': task['name'], '결과': action + ' 완료', '오류': ''})
+            except Exception as exc:
+                code = getattr(getattr(exc, 'resp', None), 'status', None)
+                reason = {401:'인증 만료 또는 인증 오류',403:'Calendar API 사용 설정·공유 권한을 확인하세요',
+                          404:'캘린더 ID 또는 공유 설정을 확인하세요',429:'요청 제한: 잠시 후 다시 시도하세요'}.get(code)
+                report.append({'업무':task['name'],'결과':'실패',
+                               '오류':reason or (str(exc) if isinstance(exc, ValueError) else '연결 오류: 다시 시도해 주세요')})
+        return report
+
+
+    def able_run_sync():
+        for task in st.session_state.schedule:
+            if not task.get('task_id'):
+                task['task_id'] = str(uuid.uuid4())
+        candidates = [t for t in st.session_state.schedule if t.get('due') is not None and t.get('use')]
+        if not candidates:
+            st.warning('날짜를 정하고 달력 표시를 켠 업무가 없습니다.')
+            return
+        try:
+            service, calendar_id = able_google_client()
+            try:
+                with st.spinner(f'{len(candidates)}개 업무를 Google 캘린더에 저장하고 있습니다…'):
+                    report = able_sync_google(candidates, service, calendar_id)
+            finally:
+                service.close()
+            st.session_state.able_google_report = report
+        except ImportError:
+            st.session_state.able_google_report = [{'업무':'연결','결과':'실패','오류':'google-api-python-client와 google-auth를 설치해 주세요.'}]
+        except Exception as exc:
+            st.session_state.able_google_report = [{'업무':'연결','결과':'실패',
+                '오류':str(exc) if isinstance(exc, ValueError) else 'Google 연결 설정을 확인해 주세요.'}]
+
+
+
     st.divider()
-    st.subheader("🔗 Google 캘린더 일괄 저장")
-    target = [t for t in st.session_state.schedule if t.get('due') is not None and t.get('use')]
-    st.caption(f"저장 대상: {len(target)}건 · 날짜가 있고 달력 표시가 켜진 업무 (완료 업무 포함)")
-    st.caption("편집 중인 내용까지 보내려면 위의 ‘수정 저장 + Google 캘린더 전체 등록·수정’을 누르세요. 같은 업무를 다시 저장하면 Google의 기존 일정을 갱신합니다.")
-    st.caption("날짜 미정·표시 해제 업무는 전송하지 않습니다. 이미 Google에 등록한 일정을 자동 삭제하지는 않습니다. 사전 점검 일정은 이 버튼의 전송 대상이 아닙니다.")
-    if st.button("저장된 업무 전체를 Google 캘린더에 등록·수정", key="able_google_all", disabled=not target):
+    st.subheader("🔗 외부 캘린더 연동")
+    st.caption("Streamlit에서 수정한 마감일과 완료 상태를 Google 캘린더에 한 번에 저장합니다.")
+    calendar_tasks = [t for t in st.session_state.schedule if t.get("due") is not None and t.get("use", False)]
+    st.caption(f"등록·수정 대상: {len(calendar_tasks)}건 · 날짜가 있고 ‘달력 표시’가 켜진 업무 전체 (완료 업무 포함)")
+    if st.button("🔵 Google Calendar에 전체 등록·수정", key="external_google_bulk", type="primary", disabled=not calendar_tasks):
         able_run_sync()
-    report = st.session_state.get('able_google_report')
+    if not calendar_tasks:
+        st.info("위에서 마감일을 정하고 ‘달력 표시’를 체크해 주세요.")
+    report = st.session_state.get("able_google_report")
     if report:
-        failed = sum(r['결과'] == '실패' for r in report)
+        failed = sum(row["결과"] == "실패" for row in report)
         if failed:
-            st.warning(f"최근 전송 결과: 성공 {len(report)-failed}건 / 실패 {failed}건. 실패 원인을 확인한 뒤 다시 저장하세요.")
+            st.warning(f"최근 전송 결과: 성공 {len(report)-failed}건 / 실패 {failed}건")
         else:
             st.success(f"최근 전송 결과: {len(report)}건을 Google 캘린더에 저장했습니다.")
         st.dataframe(report, hide_index=True)
-    st.caption("계정 연결 전에는 코드 상단의 최초 설정을 완료해 주세요. Streamlit 세션이 초기화되면 업무 ID도 사라질 수 있으므로 업무 데이터의 영구 저장은 별도로 필요합니다.")
+    st.caption("Google 최초 연결 설정이 필요합니다. 같은 업무 ID는 재등록하지 않고 기존 일정을 수정합니다. 앱 세션 초기화로 업무 ID가 사라지면 중복 방지가 유지되지 않을 수 있습니다.")
+    st.caption("기한 미정·표시 해제 업무와 D-14·D-7·D-1 점검 일정은 전송하지 않습니다. 이미 Google에 저장한 일정은 표시를 해제해도 자동 삭제하지 않습니다.")
 
 # ══════════════════════════════════════════════════════════════
 # 메뉴 4: 팔로업 메일 초안 자동 생성 & 원클릭 승인
