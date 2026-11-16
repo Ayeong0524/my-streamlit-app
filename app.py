@@ -1,11 +1,13 @@
 
 import os
+import logging
+from pathlib import Path
+
 import streamlit as st
 
 from rag import rag_pipeline
 
 
-# 1. 화면 설정
 st.set_page_config(
     page_title="AIVLE 학습도우미",
     page_icon="🎓",
@@ -18,16 +20,13 @@ st.markdown(
         .stApp {
             background-color: #F7F8FC;
         }
-
         .block-container {
             max-width: 900px;
             padding-top: 2rem;
         }
-
         [data-testid="stSidebar"] {
             background-color: #EEF1F8;
         }
-
         [data-testid="stChatMessage"] {
             background-color: white;
             border: 1px solid #E4E8F0;
@@ -39,19 +38,44 @@ st.markdown(
 )
 
 
-# 2. 대화와 체인 저장
+# API 키 확인
+api_key = os.environ.get("OPENAI_API_KEY")
+
+if not api_key:
+    try:
+        api_key = st.secrets.get("OPENAI_API_KEY")
+    except FileNotFoundError:
+        api_key = None
+
+if not api_key:
+    st.error("앱 Settings → Secrets에 OPENAI_API_KEY를 설정해 주세요.")
+    st.stop()
+
+os.environ["OPENAI_API_KEY"] = api_key
+
+
+# PDF 경로: GitHub 저장소에 함께 올린 파일
+pdf_path = Path(__file__).resolve().parent / "aivle_whitepaper.pdf"
+
+if not pdf_path.is_file():
+    st.error("저장소에 aivle_whitepaper.pdf 파일이 없습니다.")
+    st.stop()
+
+
+# 대화 기록
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-if "rag_chain" not in st.session_state:
-    st.session_state.rag_chain = None
+
+# 같은 서버에서 체인을 공유해 중복 초기화 방지
+@st.cache_resource
+def load_chain(filepath, modified_time, file_size):
+    return rag_pipeline(filepath, search_type="mmr", k=6)
 
 
-# 3. 사이드바
 with st.sidebar:
     st.title("🎓 AIVLE")
     st.caption("백서 기반 학습도우미")
-
     st.divider()
 
     st.markdown("**이런 내용을 물어보세요**")
@@ -64,54 +88,38 @@ with st.sidebar:
 
     st.divider()
 
-    if st.button(
-        "🗑️ 대화 초기화",
-        use_container_width=True,
-    ):
+    if st.button("🗑️ 대화 초기화", use_container_width=True):
         st.session_state.messages = []
         st.rerun()
 
     st.caption(
-        "선배 후기는 해당 기수의 경험입니다. "
-        "운영 기준은 적용 기수를 함께 확인해 주세요."
+        "기수별 운영 기준과 선배 개인 경험을 구분하여 확인해 주세요."
     )
 
 
-# 4. 메인 제목
 st.title("AIVLE School 학습도우미")
 st.write("궁금한 내용을 질문하면 백서에서 근거를 찾아 답해 드려요.")
 st.caption("교육 안내 · 학습 전략 · 프로젝트 · 취업 준비")
 
 
-# 5. 기존 벡터 DB 연결
-# 첫 접속 때만 체인을 만들고 이후 질문에서는 재사용
-if st.session_state.rag_chain is None:
-    pdf_path = os.environ.get("AIVLE_PDF_PATH")
+# 백서 연결
+try:
+    stat = pdf_path.stat()
 
-    if not pdf_path or not os.path.isfile(pdf_path):
-        st.error("PDF 경로를 확인해 주세요. 코랩의 ①번 셀을 실행해야 합니다.")
-        st.stop()
+    with st.spinner("백서를 연결하고 있어요. 첫 실행에는 시간이 걸릴 수 있어요."):
+        chain = load_chain(
+            str(pdf_path),
+            stat.st_mtime_ns,
+            stat.st_size,
+        )
 
-    try:
-        with st.spinner("백서 검색 자료를 연결하고 있어요..."):
-            st.session_state.rag_chain = rag_pipeline(
-                pdf_path,
-                search_type="mmr",
-                k=6,
-            )
-
-    except Exception:
-        st.error("검색 자료 연결에 실패했어요.")
-
-        # 오류 상세는 코랩의 streamlit.log에 기록
-        import logging
-        logging.exception("RAG 초기화 실패")
-
-        st.info("코랩에서 streamlit.log를 확인해 주세요.")
-        st.stop()
+except Exception:
+    logging.exception("RAG 초기화 실패")
+    st.error("백서 연결에 실패했어요. Manage app의 로그를 확인해 주세요.")
+    st.stop()
 
 
-# 6. 추천 질문
+# 추천 질문
 selected_question = None
 
 if not st.session_state.messages:
@@ -136,47 +144,42 @@ if not st.session_state.messages:
                 selected_question = example
 
 
-# 7. 이전 대화 표시
+# 이전 대화 표시
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
 
-# 8. 질문 입력
 typed_question = st.chat_input(
     "예: 정상수료와 우수수료는 어떻게 다른가요?"
 )
 
 question = selected_question or typed_question
 
-
-# 9. 답변 생성
 if question:
+    st.session_state.messages.append({
+        "role": "user",
+        "content": question,
+    })
+
     with st.chat_message("user"):
         st.markdown(question)
-
-    st.session_state.messages.append(
-        {"role": "user", "content": question}
-    )
 
     with st.chat_message("assistant"):
         try:
             with st.spinner("백서에서 답변을 찾고 있어요..."):
-                answer = st.session_state.rag_chain.invoke(
-                    {"input": question}
-                )
+                answer = chain.invoke({"input": question})
 
             st.markdown(answer)
 
-            st.session_state.messages.append(
-                {"role": "assistant", "content": answer}
-            )
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": answer,
+            })
 
         except Exception:
+            logging.exception("답변 생성 실패")
             st.error(
                 "답변 생성에 실패했어요. "
-                "연결 상태를 확인한 뒤 다시 질문해 주세요."
+                "Manage app의 로그를 확인해 주세요."
             )
-
-            import logging
-            logging.exception("답변 생성 실패")
